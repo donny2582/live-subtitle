@@ -1,0 +1,5 @@
+# 本機語音辨識 + NVIDIA GPU 加速（CUDA 12 + cuDNN 9，對應 CTranslate2 4.x）
+# 不需要另外安裝 CUDA Toolkit，程式會自動載入這些 DLL
+-r requirements-local-asr.txt
+nvidia-cublas-cu12
+nvidia-cudnn-cu12==9.*

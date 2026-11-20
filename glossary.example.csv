@@ -1,0 +1,38 @@
+source,target
+# 交通安全術語表範例：第一欄原文（英／日／韓皆可），第二欄固定譯法
+# 用 Excel 編輯時請「另存為 CSV UTF-8」。以 # 開頭的行為註解。
+# 只會把「這句話裡有出現」的術語送給翻譯模型，所以多寫不會增加費用。
+section control,區間測速
+average speed enforcement,區間測速
+average speed camera,區間測速照相
+speed camera,測速照相
+red light camera,闖紅燈照相
+ANPR,車牌辨識系統
+road safety audit,道路安全稽核
+Vision Zero,零死亡願景
+Safe System approach,安全系統方法
+vulnerable road users,弱勢用路人
+near miss,虛驚事件
+black spot,易肇事路段
+crash reconstruction,事故重建
+accident investigation report,事故調查報告
+traffic calming,交通寧靜措施
+right of way,路權
+drink driving,酒駕
+drunk driving,酒駕
+motorcycle,機車
+scooter,機車
+pedestrian crossing,行人穿越道
+オービス,測速照相
+飲酒運転,酒駕
+歩行者,行人
+横断歩道,行人穿越道
+ヒヤリハット,虛驚事件
+原付,輕型機車
+구간단속,區間測速
+과속단속카메라,測速照相
+음주운전,酒駕
+보행자,行人
+횡단보도,行人穿越道
+이륜차,機車
+어린이보호구역,兒童保護區

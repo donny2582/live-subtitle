@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 執行產物（含會議內容，切勿提交）
+transcripts/
+logs/
+models/
+usage_ledger*.json
+
+# 個人設定（可能含路徑或金鑰）
+config.toml
+glossary.csv
+
+# 打包產物
+build/
+dist/
+
+# 設定視窗存檔用的暫存檔
+*.tmp

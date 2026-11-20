@@ -1,0 +1,112 @@
+# ===========================================================================
+# 即時字幕翻譯設定檔
+# 第一次執行時會自動複製成 config.toml，請修改 config.toml（不要改這個範例檔）。
+# 沒寫到的項目會使用程式預設值。
+#
+# 結構：每個模組一個區段，每個雲端服務一個子區段。
+#   切換服務只要改 [asr] engine 或 [translate] engine；
+#   各服務的模型、金鑰環境變數、單價都寫在自己的子區段裡。
+# API 金鑰一律放環境變數（setx OPENAI_API_KEY "sk-..."），不要寫進這個檔案。
+# ===========================================================================
+
+[audio]
+source = "loopback"        # loopback = 擷取電腦播放的聲音（會議、影片）；mic = 麥克風
+device_index = -1          # -1 = 預設喇叭／耳機；用 run.ps1 -ListDevices 查詢編號
+
+[segmenter]
+vad_aggressiveness = 2     # 0~3，背景音樂或雜音多時調高
+end_silence_ms = 600       # 停頓多久算一句結束；講者語速慢可調高到 800
+max_utterance_s = 10.0     # 一句最長秒數，超過會強制切開
+partial_interval_s = 0.7   # 中間結果更新頻率（秒），0 = 關閉
+
+# ---------------------------------------------------------------- 語音辨識
+[asr]
+engine = "cloud"           # cloud = 雲端（不需 GPU）；local = 本機 faster-whisper
+allowed_languages = ["en", "ja", "ko", "zh"]
+sticky_language_prob = 0.6 # 短句或信心低時沿用上一句語言
+glossary_prompt = false    # true = 把術語原文提示給辨識模型（專有名詞多時可試）
+partial_results = "auto"   # auto = 只有本機 GPU 才開中間結果（雲端開啟費用約 4 倍）；on / off
+
+[asr.cloud]
+# 任何 OpenAI 相容的 /audio/transcriptions 服務
+#   OpenAI：base_url = "https://api.openai.com/v1"
+#           model = "gpt-4o-mini-transcribe"（較便宜）或 "gpt-4o-transcribe"、"whisper-1"
+#   Groq：  base_url = "https://api.groq.com/openai/v1"、model = "whisper-large-v3-turbo"
+#           api_key_env = "GROQ_API_KEY"、usd_per_minute = 0.000667、min_billed_s = 10.0
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini-transcribe"
+api_key_env = "OPENAI_API_KEY"
+response_format = "auto"   # auto = whisper 模型用 verbose_json（回傳語言），其他用 json
+timeout_s = 10.0
+max_retries = 1
+usd_per_minute = 0.003     # 單價（美元／每分鐘音訊），請依官網更新，供預算計算
+min_billed_s = 0.0         # 每次請求最少計費秒數（Groq 填 10）
+
+[asr.local]
+# 需先執行 scripts\setup.ps1 -LocalAsr（有 NVIDIA 顯示卡再加 -Gpu）
+model = "large-v3-turbo"   # 有 NVIDIA GPU 時使用；VRAM 不足可改 "medium" 或 "small"
+cpu_model = "small"        # 沒有 GPU 時自動改用（CPU 跑大模型會跟不上）
+device = "auto"            # auto / cuda / cpu
+model_dir = "models"       # 模型下載位置
+
+# ---------------------------------------------------------------- 翻譯
+[translate]
+engine = "openai"          # openai / claude / deepl / none（none = 只顯示原文）
+context_turns = 3          # 帶入前幾句當上下文，提高用詞一致性
+partial_translation = true # 句子講到一半就先翻譯（較即時，但較耗費用）
+partial_min_interval_s = 1.2
+taiwan_convert = true      # OpenCC 轉台灣正體與用語
+glossary_path = "glossary.csv"
+
+[translate.openai]
+# OpenAI 相容 API：也可改用 Gemini、DeepSeek，或本機 Ollama
+#   Ollama 範例：base_url = "http://localhost:11434/v1"、model = "qwen2.5:7b"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4.1-mini"     # 想更省錢可改 "gpt-4o-mini"（記得同步修改下方單價 0.15／0.60）
+api_key_env = "OPENAI_API_KEY"
+timeout_s = 8.0
+# 單價（美元／每百萬 token），請依實際使用的模型更新
+input_usd_per_million_tokens = 0.40
+output_usd_per_million_tokens = 1.60
+
+[translate.claude]
+# 金鑰：setx ANTHROPIC_API_KEY "sk-ant-..."
+# 想更省錢可改 model = "claude-haiku-5-5"、thinking = "off"，
+# 單價改 0.10／0.50（約為 Opus 的 1/40，也比 gpt-4.1-mini 便宜）
+model = "claude-opus-5-5"
+api_key_env = "ANTHROPIC_API_KEY"
+effort = "low"             # low 最快最省，字幕翻譯建議維持 low
+thinking = "auto"          # auto = 模型預設；off = 關閉思考（Opus 5.5 不支援 off）
+refusal_fallback = true    # 模型拒答時自動改用備援模型（僅支援的模型會送出）
+timeout_s = 15.0
+input_usd_per_million_tokens = 4.00
+output_usd_per_million_tokens = 20.00
+
+[translate.deepl]
+api_key_env = "DEEPL_API_KEY"   # Free 金鑰以 :fx 結尾
+usd_per_million_chars = 0.0     # DeepL Free 填 0；DeepL Pro 依方案填入
+
+# ---------------------------------------------------------------- 其他
+[budget]
+monthly_limit_usd = 5.0    # 語音辨識＋翻譯每月合計上限，超過自動停止雲端請求；0 = 不限制
+partial_cutoff_ratio = 0.7 # 用到 70% 後停止「中間結果」的雲端請求，只處理定稿
+ledger_path = "usage_ledger.json"
+
+[overlay]
+show_source = true         # 雙行顯示：原文（小字）＋ 中文（大字）
+font_family = "Microsoft JhengHei UI"
+font_size = 26
+source_font_size = 15
+max_lines = 2              # 同時顯示幾句
+width_ratio = 0.7          # 字幕寬度佔螢幕比例
+bottom_margin = 90
+bg_opacity = 0.6
+click_through = false
+clear_after_s = 8.0        # 幾秒沒有新內容就清除
+
+[output]
+transcript_dir = "transcripts"
+write_srt = true           # 字幕檔，可搭配錄影檔使用
+write_txt = true           # 易讀版逐字稿
+write_jsonl = true         # 機器可讀，方便後續做摘要或分析
+srt_include_source = true

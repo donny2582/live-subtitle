@@ -1,0 +1,9 @@
+# 核心執行套件（雲端語音辨識＋雲端翻譯；Windows 10/11，Python 3.11~3.14）
+PyAudioWPatch>=0.2.12 ; sys_platform == "win32"
+webrtcvad-wheels>=2.0.14
+soxr>=0.5
+numpy>=1.26
+PyQt6>=6.7
+requests>=2.32
+opencc-python-reimplemented>=0.1.7
+anthropic>=2.11,<3
