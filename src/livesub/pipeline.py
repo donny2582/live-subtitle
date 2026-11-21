@@ -45,6 +45,7 @@ EventCallback = Callable[[SubtitleEvent], None]
 StatusCallback = Callable[[str], None]
 
 _POLL_S = 0.05  # 各迴圈等待新資料的間隔（秒）；越短反應越快，但會多耗一點 CPU
+_STREAM_UI_INTERVAL_S = 0.1  # 串流翻譯時，畫面最多每 0.1 秒更新一次
 
 
 class LatestOnly(Generic[T]):
@@ -277,6 +278,9 @@ class Pipeline:
                     self._final_trs.put(self._empty(utt))
                 continue
             if tr.is_final:
+                if self._needs_translation(tr):
+                    # 先把原文顯示出來，不必等翻譯完成（翻譯通常還要 1 秒左右）
+                    self._on_event(self._event(tr, Stage.PARTIAL_SOURCE))
                 self._final_trs.put(tr)
             elif tr.seq > self._finalized_seq:
                 self._on_event(self._event(tr, Stage.PARTIAL_SOURCE))
@@ -329,6 +333,10 @@ class Pipeline:
                 continue
             self._translate_final(tr)
 
+    def _needs_translation(self, tr: Transcription) -> bool:
+        """這句會送去翻譯嗎？（中文只做繁體轉換、選了「不翻譯」時都不用）"""
+        return bool(tr.text) and tr.language != "zh" and self.translator.name != "none"
+
     def _cloud_allowed(self, is_cloud: bool, partial: bool) -> bool:
         """預算檢查：本機服務永遠允許；雲端服務交給費用帳本判斷（中間結果會比定稿先被停掉）。"""
         if not is_cloud or self.ledger is None:
@@ -356,6 +364,18 @@ class Pipeline:
                             translate_latency_s=res.latency_s)
             )
 
+    def _stream_updater(self, tr: Transcription) -> Callable[[str], None]:
+        """回傳給串流翻譯用的函式：收到目前為止的譯文就更新畫面（最多每 0.1 秒一次，避免閃爍）。"""
+        last = [0.0]
+
+        def update(partial_text: str) -> None:
+            now = time.monotonic()
+            if partial_text and now - last[0] >= _STREAM_UI_INTERVAL_S:
+                last[0] = now
+                self._on_event(self._event(tr, Stage.PARTIAL_TRANSLATION, translated_text=partial_text))
+
+        return update
+
     def _translate_final(self, tr: Transcription) -> None:
         """翻譯定稿，寫入逐字稿並顯示。中文語音不送翻譯，只做繁體轉換。"""
         self._throttle.forget(tr.seq)
@@ -368,7 +388,12 @@ class Pipeline:
         elif self.translator.name != "none":
             if self._cloud_allowed(self.translator.is_cloud, partial=False):
                 try:
-                    res = self.translator.translate(tr.text, tr.language)
+                    if getattr(self.translator, "supports_streaming", False):
+                        # 串流：譯文一邊產生一邊顯示，不用等整句翻完
+                        res = self.translator.translate(tr.text, tr.language,
+                                                        on_delta=self._stream_updater(tr))
+                    else:
+                        res = self.translator.translate(tr.text, tr.language)
                     translated, latency = res.text, res.latency_s
                 except TranslationError as exc:
                     error = str(exc)

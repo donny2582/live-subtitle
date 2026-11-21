@@ -10,6 +10,7 @@ from .loader import (
     load_config_with_notes,
     parse_config,
     resolve_path,
+    user_data_dir,
 )
 from .schema import (
     AppConfig,
@@ -54,4 +55,5 @@ __all__ = [
     "resolve_path",
     "save_config_updates",
     "update_toml_text",
+    "user_data_dir",
 ]

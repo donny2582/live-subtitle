@@ -13,6 +13,10 @@
     → save_config_updates() 寫回 config.toml（保留註解）
     → 通知 app.py（on_saved），外觀立即套用、其他設定詢問是否重新啟動
 
+兩種模式：
+* 一般模式：字幕執行中從選單開啟，按鈕是「儲存／取消」。
+* 啟動模式（launcher=True）：程式一啟動就顯示，按鈕是「開始字幕／結束」。
+
 四個分頁：服務與費用、API 金鑰、音訊與斷句、字幕外觀（各由一個 _build_* 方法建立）。
 """
 
@@ -33,6 +37,7 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFontComboBox,
     QFormLayout,
     QGroupBox,
@@ -74,16 +79,23 @@ def _hint(text: str) -> QLabel:
 
 
 class SettingsDialog(QDialog):
-    """設定視窗。存檔成功後呼叫 on_saved(新設定, 變更的鍵)。"""
+    """設定視窗。存檔成功後呼叫 on_saved(新設定, 變更的鍵)。
+
+    launcher=True 是「啟動模式」：程式啟動時先顯示這個視窗，
+    按鈕變成「開始字幕」與「結束」。按「開始字幕」會先存檔、檢查金鑰，
+    沒問題才關閉視窗（exec() 回傳 Accepted），app.py 接著啟動字幕。
+    """
 
     def __init__(
         self,
         config_path: Path,
         on_saved: Callable[[AppConfig, set[str]], None] | None = None,
         parent: QWidget | None = None,
+        launcher: bool = False,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("即時字幕 － 設定")
+        self._launcher = launcher
+        self.setWindowTitle("即時字幕" if launcher else "即時字幕 － 設定")
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self.setMinimumWidth(560)
         self._path = config_path
@@ -100,9 +112,11 @@ class SettingsDialog(QDialog):
 
         tabs = QTabWidget(self)
         tabs.addTab(self._build_services(), "服務與費用")
-        tabs.addTab(self._build_keys(), "API 金鑰")
+        self._keys_tab = tabs.addTab(self._build_keys(), "API 金鑰")
         tabs.addTab(self._build_audio(), "音訊與斷句")
         tabs.addTab(self._build_overlay(), "字幕外觀")
+        tabs.addTab(self._build_output(), "逐字稿")
+        self._tabs = tabs
 
         advanced = QPushButton("開啟設定檔（進階）")
         advanced.setToolTip("用記事本開啟 config.toml，可調整視窗裡沒有的細節。改完需重新啟動。")
@@ -112,14 +126,25 @@ class SettingsDialog(QDialog):
                             "存檔後重新啟動生效。")
         glossary.clicked.connect(self._open_glossary)
         buttons = QDialogButtonBox()
-        buttons.addButton("儲存", QDialogButtonBox.ButtonRole.AcceptRole)
-        buttons.addButton("取消", QDialogButtonBox.ButtonRole.RejectRole)
-        buttons.accepted.connect(self._save)
+        if launcher:
+            # 啟動模式：存檔＋檢查金鑰後開始字幕；「結束」直接離開程式
+            start = buttons.addButton("開始字幕", QDialogButtonBox.ButtonRole.AcceptRole)
+            start.setDefault(True)  # 按 Enter 就開始
+            buttons.addButton("結束", QDialogButtonBox.ButtonRole.RejectRole)
+            buttons.accepted.connect(self._start)
+        else:
+            buttons.addButton("儲存", QDialogButtonBox.ButtonRole.AcceptRole)
+            buttons.addButton("取消", QDialogButtonBox.ButtonRole.RejectRole)
+            buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
 
         bottom = QHBoxLayout()
         bottom.addWidget(advanced)
         bottom.addWidget(glossary)
+        shortcut = QPushButton("建立桌面捷徑")
+        shortcut.setToolTip("在桌面建立「即時字幕」捷徑，之後雙擊就能開啟（已有的話會覆蓋）。")
+        shortcut.clicked.connect(self._make_shortcut)
+        bottom.addWidget(shortcut)
         bottom.addStretch(1)
         bottom.addWidget(buttons)
         root = QVBoxLayout(self)
@@ -388,6 +413,81 @@ class SettingsDialog(QDialog):
         combo.blockSignals(False)
 
     # ================================================================== 分頁：外觀
+    def _build_output(self) -> QWidget:
+        """「逐字稿」分頁：存放位置（可選任何資料夾，例如「文件」或隨身碟）與輸出格式。"""
+        page = QWidget()
+        lay = QVBoxLayout(page)
+
+        where = QGroupBox("存放位置（每次開始字幕會在這裡建立一個「日期_時間」資料夾）")
+        form = QFormLayout(where)
+        self._out_dir = QLineEdit(self._cfg.output.transcript_dir)
+        self._out_dir.setReadOnly(True)  # 用「瀏覽…」選，避免打錯路徑
+        self._bindings["output.transcript_dir"] = self._out_dir.text
+        self._out_full = _hint("")
+        browse = QPushButton("瀏覽…")
+        browse.clicked.connect(self._browse_output)
+        reset = QPushButton("還原預設")
+        reset.setToolTip("存到程式旁邊的 transcripts 資料夾")
+        reset.clicked.connect(lambda: self._set_output_dir("transcripts"))
+        open_btn = QPushButton("開啟資料夾")
+        open_btn.clicked.connect(self._open_output)
+        row = QHBoxLayout()
+        row.addWidget(self._out_dir, 1)
+        for b in (browse, reset, open_btn):
+            row.addWidget(b)
+        form.addRow("資料夾：", row)
+        form.addRow("", self._out_full)
+        lay.addWidget(where)
+        self._set_output_dir(self._cfg.output.transcript_dir)
+
+        fmt = QGroupBox("要輸出哪些檔案")
+        form = QFormLayout(fmt)
+        form.addRow(self._check("output.write_srt", "subtitles.srt（字幕檔，可搭配錄影檔播放）"))
+        form.addRow(self._check("output.srt_include_source", "字幕檔裡也放原文"))
+        form.addRow(self._check("output.write_txt", "transcript.txt（易讀版逐字稿）"))
+        form.addRow(self._check("output.write_jsonl", "transcript.jsonl（給程式分析用）"))
+        lay.addWidget(fmt)
+        lay.addWidget(_hint("變更後下次開始字幕時生效。逐字稿含會議內容，請存在安全的地方。"))
+        lay.addStretch(1)
+        return page
+
+    def _output_path(self) -> Path:
+        """目前選的逐字稿資料夾（相對路徑以設定檔所在資料夾為準，和程式實際使用的一致）。"""
+        p = Path(self._out_dir.text()).expanduser()
+        return p if p.is_absolute() else self._path.parent / p
+
+    def _set_output_dir(self, value: str) -> None:
+        self._out_dir.setText(value)
+        self._out_full.setText(f"實際位置：{self._output_path()}")
+
+    def _browse_output(self) -> None:
+        """跳出「選擇資料夾」視窗；選了之後存成完整路徑。"""
+        start = self._output_path()
+        chosen = QFileDialog.getExistingDirectory(self, "選擇逐字稿存放資料夾",
+                                                  str(start if start.exists() else Path.home()))
+        if chosen:
+            self._set_output_dir(str(Path(chosen)))
+
+    def _open_output(self) -> None:
+        path = self._output_path()
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            QMessageBox.warning(self, "逐字稿", f"無法建立資料夾：{exc}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def _make_shortcut(self) -> None:
+        """在桌面建立捷徑（開發版和打包的 exe 都適用）。"""
+        from .shortcut import create_desktop_shortcut
+
+        try:
+            link = create_desktop_shortcut()
+        except (OSError, RuntimeError) as exc:
+            QMessageBox.warning(self, "建立捷徑", f"建立失敗：{exc}")
+            return
+        QMessageBox.information(self, "建立捷徑", f"已在桌面建立捷徑：\n{link}")
+
     def _build_overlay(self) -> QWidget:
         """「字幕外觀」分頁：字型、字級、句數、寬度、透明度、位置。"""
         page = QWidget()
@@ -471,25 +571,52 @@ class SettingsDialog(QDialog):
         # 最後再過濾一次（服務選項裡和目前設定相同的值不必寫）
         return {k: v for k, v in updates.items() if _differs(get_value(self._cfg, k), v)}
 
-    def _save(self) -> None:
-        """按下「儲存」：檢查 → 寫檔 → 重新讀取確認 → 通知 app.py → 關閉視窗。"""
+    def _apply(self) -> bool:
+        """檢查 → 寫檔 → 重新讀取確認 → 通知 app.py。成功（或沒有變更）回傳 True。"""
         if not any(cb.isChecked() for cb in self._langs.values()):
             QMessageBox.warning(self, "設定", "「會出現的語言」至少要勾一個。")
-            return
+            return False
         updates = self.collect_updates()
         if not updates:
-            self.accept()
-            return
+            return True
         try:
             save_config_updates(self._path, updates)
             new_cfg = load_config(self._path)
         except (ConfigError, OSError) as exc:
             QMessageBox.warning(self, "儲存失敗", str(exc))
-            return
+            return False
         log.info("設定已更新：%s", ", ".join(sorted(updates)))
         self._cfg = new_cfg
         if self._on_saved:
             self._on_saved(new_cfg, set(updates))
+        return True
+
+    def _save(self) -> None:
+        """按下「儲存」：存檔成功就關閉視窗。"""
+        if self._apply():
+            self.accept()
+
+    def missing_keys(self) -> list[str]:
+        """目前選的服務需要、但還沒設定的金鑰。"""
+        return sorted(k for k in self._needed_keys() if not read_user_env(k))
+
+    def _start(self) -> None:
+        """按下「開始字幕」（啟動模式）：存檔 → 檢查金鑰 → 關閉視窗讓 app.py 開始字幕。"""
+        if not self._apply():
+            return
+        missing = self.missing_keys()
+        if missing:
+            # 缺金鑰：預設不啟動，並切到金鑰分頁；Claude 也可能用其他方式登入，所以仍可選擇繼續
+            self._tabs.setCurrentIndex(self._keys_tab)
+            answer = QMessageBox.question(
+                self, "缺少 API 金鑰",
+                "目前選的服務需要以下金鑰，但還沒設定：\n\n" + "\n".join(missing)
+                + "\n\n請先在「API 金鑰」分頁貼上並儲存。仍要啟動嗎？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
         self.accept()
 
     def _open_glossary(self) -> None:

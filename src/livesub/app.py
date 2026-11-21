@@ -5,7 +5,8 @@
 main() 的流程：
     1. 解析命令列參數（--settings、--list-devices、--engine…）
     2. 設定 log（寫到 logs\\livesub.log）
-    3. 讀取 config.toml（第一次執行會從範例檔複製一份）
+    3. 顯示設定視窗（啟動模式），按「開始字幕」後讀取 config.toml
+       （加 --skip-settings 可跳過；第一次執行會從範例檔複製一份設定檔）
     4. 依設定建立各元件：術語表、費用帳本、翻譯器、辨識器、逐字稿寫入器
     5. 建立畫面（字幕浮層、系統匣選單）
     6. 把元件交給 Pipeline 串起來，啟動背景處理
@@ -22,9 +23,18 @@ import signal
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Any
 
 from . import __version__
-from .config import AppConfig, ConfigError, app_base_dir, load_config_with_notes, replace, resolve_path
+from .config import (
+    AppConfig,
+    ConfigError,
+    app_base_dir,
+    load_config_with_notes,
+    replace,
+    resolve_path,
+    user_data_dir,
+)
 
 log = logging.getLogger("livesub")
 
@@ -35,6 +45,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--config", type=Path, default=None, help="設定檔路徑（預設為 config.toml）")
     p.add_argument("--list-devices", action="store_true", help="列出音訊裝置後結束")
     p.add_argument("--settings", action="store_true", help="只開啟設定視窗（不啟動字幕）")
+    p.add_argument("--skip-settings", action="store_true",
+                   help="直接開始字幕，不先顯示設定視窗")
+    # 內部使用：由「重新啟動」產生，代表要等舊程式結束、放開單一執行個體的鎖
+    p.add_argument("--restarted", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--device-index", type=int, default=None, help="指定音訊裝置編號")
     p.add_argument("--source", choices=["loopback", "mic", "both"], default=None,
                    help="音訊來源：loopback = 系統聲音、mic = 麥克風、both = 兩者混音")
@@ -97,6 +111,7 @@ def restart_command() -> list[str]:
     """重新啟動本程式的指令（去掉覆蓋設定的參數與 --settings）。
 
     依啟動方式不同，重組出一樣的指令：打包的 .exe、`python -m livesub`、或直接跑腳本。
+    使用者剛在設定視窗存檔才重新啟動，所以加上 --skip-settings，不再顯示一次設定視窗。
     """
     if getattr(sys, "frozen", False):  # PyInstaller 打包的 .exe
         prog, args = [sys.executable], sys.argv[1:]
@@ -115,6 +130,9 @@ def restart_command() -> list[str]:
             skip = "=" not in a and a != "--settings"
             continue
         kept.append(a)
+    for flag in ("--skip-settings", "--restarted"):
+        if flag not in kept:
+            kept.append(flag)
     return prog + kept
 
 
@@ -129,13 +147,15 @@ def run_settings_only(cfg_path: Path) -> int:
     return 0
 
 
-def ensure_user_files(base: Path) -> None:
-    """第一次執行時，從範例檔複製出可編輯的設定檔與術語表。
+def ensure_user_files(base: Path, data: Path | None = None) -> None:
+    """第一次執行時，從範例檔（在 base）複製出可編輯的設定檔與術語表（到 data）。
 
     範例檔（*.example.*）會跟著程式更新；使用者只改複製出來的那份，更新時就不會被覆蓋。
     """
+    data = data or base
+    data.mkdir(parents=True, exist_ok=True)
     for example, target in (("config.example.toml", "config.toml"), ("glossary.example.csv", "glossary.csv")):
-        src, dst = base / example, base / target
+        src, dst = base / example, data / target
         if src.exists() and not dst.exists():
             shutil.copyfile(src, dst)
             log.info("已建立 %s，可依需求修改", dst)
@@ -175,15 +195,58 @@ def main(argv: list[str] | None = None) -> int:
     # ---- 1~2. 參數與 log ----
     args = parse_args(argv)
     base = app_base_dir()  # 程式所在資料夾（開發時是專案根目錄，打包後是 exe 旁邊）
-    configure_logging(args.log_level, base / "logs", console=not headless)
+    data = user_data_dir(base)  # 設定、log、逐字稿的位置（通常就是 base；不能寫入時改用 %APPDATA%）
+    configure_logging(args.log_level, data / "logs", console=not headless)
+    if data != base:
+        log.info("程式資料夾無法寫入，設定與紀錄改存到 %s", data)
     if args.list_devices:
         return print_devices()
 
     # ---- 3. 設定檔 ----
-    ensure_user_files(base)
-    cfg_path = args.config or (base / "config.toml")
+    ensure_user_files(base, data)
+    cfg_path = args.config or (data / "config.toml")
     if args.settings:
         return run_settings_only(cfg_path)
+
+    from PyQt6.QtCore import QTimer
+    from PyQt6.QtWidgets import QApplication, QDialog
+
+    from .ui.settings import SettingsDialog
+    from .ui.single_instance import SingleInstance, bring_to_front
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)  # 關掉設定視窗時不要連整個程式一起結束
+
+    # 同時只能開一個：已經在執行的話，叫原本那個把視窗拿到最前面，自己結束
+    # （重新啟動時舊程式還在收尾，所以最多等 10 秒讓它放開鎖）
+    instance = SingleInstance()
+    if not instance.acquire(wait_ms=10_000 if args.restarted else 0):
+        if instance.notify_running():
+            log.info("即時字幕已在執行中，已通知原本的程式顯示視窗")
+        else:
+            log.warning("即時字幕已在執行中，但無法通知它")
+        return 0
+
+    # 另一個程式要求顯示視窗時：有對話框開著就把它拿到最前面，否則開啟設定視窗
+    # 字幕還沒開始前 open_settings 是 None，此時一定是啟動用的設定視窗開著
+    ui: dict[str, Any] = {"open_settings": None}
+
+    def on_activated() -> None:
+        dialog = app.activeModalWidget()
+        if dialog is not None:
+            bring_to_front(dialog)
+        elif ui["open_settings"] is not None:
+            ui["open_settings"]()
+
+    # 用 singleShot 延後到目前的事件處理完再執行，避免在通訊管道的處理過程中開視窗
+    instance.activated.connect(lambda: QTimer.singleShot(0, on_activated))
+
+    # 啟動模式：先顯示設定視窗，按「開始字幕」才繼續；按「結束」或關閉視窗就離開
+    if not args.skip_settings:
+        if SettingsDialog(cfg_path, launcher=True).exec() != QDialog.DialogCode.Accepted:
+            return 0
+
+    # 設定視窗可能剛存檔，所以在這之後才讀設定檔
     try:
         # legacy：舊格式設定的鍵名清單，用來提醒使用者更新
         cfg, legacy = load_config_with_notes(cfg_path) if cfg_path.exists() else (AppConfig(), [])
@@ -201,9 +264,6 @@ def main(argv: list[str] | None = None) -> int:
     cfg_base = cfg_path.resolve().parent  # 設定檔裡的相對路徑都以設定檔所在資料夾為準
 
     # 延遲載入大型相依套件，讓 --help / --list-devices 不必等待
-    from PyQt6.QtCore import QTimer
-    from PyQt6.QtWidgets import QApplication
-
     from .asr import build_transcriber
     from .audio import make_vad
     from .config.user_env import with_user_env
@@ -213,7 +273,6 @@ def main(argv: list[str] | None = None) -> int:
     from .pipeline import Pipeline
     from .translation import build_translator
     from .ui.overlay import SubtitleOverlay, TrayController, UiBridge
-    from .ui.settings import SettingsDialog
 
     # ---- 4. 建立各元件 ----
     # API 金鑰：先看目前終端機的環境變數，沒有的話再讀 Windows 使用者環境變數
@@ -229,13 +288,19 @@ def main(argv: list[str] | None = None) -> int:
         cfg.asr, cfg_base, env, ledger,
         prompt=build_asr_prompt(glossary) if cfg.asr.glossary_prompt else None,
     )
-    session_dir = create_session_dir(resolve_path(cfg_base, cfg.output.transcript_dir) or base)
+    # 逐字稿資料夾：使用者選的資料夾不能用（例如隨身碟拔掉了）時，改存到預設的 transcripts
+    transcript_root = resolve_path(cfg_base, cfg.output.transcript_dir) or (data / "transcripts")
+    transcript_warning = ""
+    try:
+        session_dir = create_session_dir(transcript_root)
+    except OSError as exc:
+        log.error("逐字稿資料夾無法使用（%s）：%s", transcript_root, exc)
+        session_dir = create_session_dir(data / "transcripts")
+        transcript_warning = f"逐字稿資料夾無法使用，本次改存到：{session_dir}"
     writer = TranscriptWriter(session_dir, cfg.output)
     log.info("語音辨識：%s；翻譯：%s；逐字稿：%s", transcriber.name, translator.name, session_dir)
 
     # ---- 5. 畫面 ----
-    app = QApplication(sys.argv)
-    app.setQuitOnLastWindowClosed(False)  # 關掉設定視窗時不要連整個程式一起結束
     # 背景執行緒不能直接操作畫面，要透過 Qt 訊號（UiBridge）轉交給主執行緒
     bridge = UiBridge()
     overlay = SubtitleOverlay(cfg.overlay)
@@ -269,15 +334,24 @@ def main(argv: list[str] | None = None) -> int:
 
             cmd = restart_command()
             pipeline.stop()
+            instance.release()  # 先放開「只能開一個」的鎖，新程式才能接手
             # 先啟動新的程式，成功了才關掉自己
             if QProcess.startDetached(cmd[0], cmd[1:], str(base)):
                 app.quit()
             else:
+                instance.acquire()  # 沒有成功重新啟動：把鎖拿回來，繼續擋住重複開啟
                 overlay.show_status("重新啟動失敗，請手動關閉後再開啟")
 
     def open_settings() -> None:
+        # 設定視窗已經開著（例如又從選單點了一次）就拿到最前面，不要再開第二個
+        if app.activeModalWidget() is not None:
+            bring_to_front(app.activeModalWidget())
+            return
+        overlay.show_status("即時字幕執行中")
         dialog = SettingsDialog(cfg_path, on_saved=on_settings_saved)
         dialog.exec()
+
+    ui["open_settings"] = open_settings
 
     tray = TrayController(  # noqa: F841 - 需保留參考（變數被回收的話系統匣圖示會消失）
         app,
@@ -300,10 +374,11 @@ def main(argv: list[str] | None = None) -> int:
 
     # ---- 7. 開始執行 ----
     overlay.show()
-    overlay.show_status("啟動中…（右鍵或系統匣圖示可開啟選單）")
+    overlay.show_status(transcript_warning or "啟動中…（右鍵或系統匣圖示可開啟選單）")
     pipeline.start()
     code = app.exec()  # 這行會一直執行，直到程式結束
     pipeline.stop()
+    instance.release()
     return code
 
 

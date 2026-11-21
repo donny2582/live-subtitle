@@ -13,7 +13,8 @@ param(
     [switch]$LocalAsr,     # also install faster-whisper (asr.engine = "local")
     [switch]$Gpu,          # local ASR + CUDA 12 / cuDNN 9 runtime DLLs (implies -LocalAsr)
     [switch]$Dev,          # also install pytest, ruff, mypy, pyinstaller
-    [string]$Python = ""   # explicit python.exe path (optional)
+    [string]$Python = "",  # explicit python.exe path (optional)
+    [switch]$NoShortcut    # do not create the desktop shortcut
 )
 
 $ErrorActionPreference = "Stop"
@@ -85,9 +86,18 @@ foreach ($pair in @(@("config.example.toml", "config.toml"), @("glossary.example
     if (-not (Test-Path $pair[1])) { Copy-Item $pair[0] $pair[1] }
 }
 
+# Step 5: desktop shortcut (skip with -NoShortcut). A failure here is not fatal.
+if (-not $NoShortcut) {
+    try {
+        & (Join-Path $PSScriptRoot "create_shortcut.ps1")
+    } catch {
+        Write-Host "Could not create the desktop shortcut: $_" -ForegroundColor Yellow
+        Write-Host "You can retry later: powershell -ExecutionPolicy Bypass -File scripts\create_shortcut.ps1"
+    }
+}
+
 Write-Host ""
 Write-Host "Setup complete." -ForegroundColor Green
-Write-Host "1) Set API keys once (new terminals pick them up):"
-Write-Host '     setx OPENAI_API_KEY "sk-..."          (cloud ASR + translate.engine = openai)'
-Write-Host '     setx ANTHROPIC_API_KEY "sk-ant-..."   (translate.engine = claude)'
-Write-Host "2) Start:  powershell -ExecutionPolicy Bypass -File scripts\run.ps1"
+Write-Host "Double-click the desktop shortcut to start. The settings window opens first:"
+Write-Host "  paste your API keys in the 'API keys' tab, then press the Start button."
+Write-Host "(Or from a terminal: powershell -ExecutionPolicy Bypass -File scripts\run.ps1)"

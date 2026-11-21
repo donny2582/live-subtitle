@@ -5,6 +5,8 @@ from __future__ import annotations
 import io
 import json
 import wave
+from collections.abc import Iterator
+from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any
 
@@ -165,6 +167,16 @@ class FakeMessages:
         self.calls.append(kw)
         return self.replies.pop(0)
 
+    @contextmanager
+    def stream(self, **kw: Any) -> Iterator[Any]:
+        """模擬 SDK 的 messages.stream()：把最終文字拆成兩段送出，最後回傳完整回應。"""
+        self.calls.append({**kw, "_stream": True})
+        resp = self.replies.pop(0)
+        text = "".join(b.text for b in resp.content if b.type == "text")
+        half = len(text) // 2
+        yield SimpleNamespace(text_stream=iter([text[:half], text[half:]]),
+                              get_final_message=lambda: resp)
+
 
 class FakeAnthropic:
     def __init__(self, replies: list[Any]) -> None:
@@ -194,6 +206,7 @@ def test_claude_translator_request_shape_cost_and_context(tmp_path):
     assert call["output_config"] == {"effort": "low"}
     assert "thinking" not in call and "temperature" not in call
     assert "section control → 區間測速" in call["system"] and "英文" in call["system"]
+    assert call["messages"][-1]["content"] == "<source>We discuss section control</source>"
 
     tr.translate("Next one", "en")
     msgs = client.messages.calls[1]["messages"]
@@ -231,3 +244,34 @@ def test_claude_sdk_error_is_mapped():
     tr = ClaudeTranslator(ClaudeConfig(), [], None, ChineseNormalizer(False), client=client)
     with pytest.raises(TranslationError, match="無回應"):
         tr.translate("x", "en")
+
+
+def test_claude_streaming_sends_growing_text_and_records_cost(tmp_path):
+    ledger = BudgetLedger(BudgetConfig(), tmp_path / "u.json", month_fn=lambda: "2026-11")
+    cfg = replace(ClaudeConfig(), model="claude-haiku-5-5", thinking="off")
+    client = FakeAnthropic([reply("「我們討論區間測速」")])
+    tr = ClaudeTranslator(cfg, [], ledger, ChineseNormalizer(False), client=client)
+    assert tr.supports_streaming
+    seen: list[str] = []
+    res = tr.translate("We discuss section control", "en", on_delta=seen.append)
+    assert client.messages.calls[0]["_stream"]
+    assert len(seen) == 2 and seen[-1] == "我們討論區間測速"  # 第二段時已是完整譯文
+    assert res.text == "我們討論區間測速" and res.cost_usd > 0  # 用量取自最終回應
+
+
+def test_claude_streaming_error_is_mapped():
+    import anthropic
+
+    class BoomStream:
+        @contextmanager
+        def stream(self, **_: Any) -> Iterator[Any]:
+            def pieces() -> Iterator[str]:
+                yield "半"
+                raise anthropic.APIConnectionError(request=None)  # type: ignore[arg-type]
+
+            yield SimpleNamespace(text_stream=pieces(), get_final_message=lambda: None)
+
+    client = SimpleNamespace(messages=BoomStream(), beta=SimpleNamespace(messages=BoomStream()))
+    tr = ClaudeTranslator(ClaudeConfig(), [], None, ChineseNormalizer(False), client=client)
+    with pytest.raises(TranslationError, match="無回應"):
+        tr.translate("x", "en", on_delta=lambda _t: None)

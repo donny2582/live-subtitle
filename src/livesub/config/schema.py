@@ -79,9 +79,9 @@ class SegmenterConfig:
     frame_ms: int = 30  # VAD 每次判斷的音訊長度（webrtcvad 只接受 10/20/30 毫秒）
     vad_aggressiveness: int = 2  # 0~3，越大越嚴格（背景音樂多時調高）
     min_speech_ms: int = 300  # 連續說話至少這麼久才算一句開始（過濾咳嗽、雜音）
-    end_silence_ms: int = 600  # 靜音多久視為一句結束
+    end_silence_ms: int = 450  # 靜音多久視為一句結束（越短字幕越快出現，但句子容易被切碎）
     soft_end_silence_ms: int = 250  # 句子偏長時改用較短靜音門檻，避免硬切在字中間
-    max_utterance_s: float = 10.0  # 一句最長秒數，超過就強制切開
+    max_utterance_s: float = 5.0  # 一句最長秒數，超過就強制切開（要等整句講完才處理，太長會延遲）
     pre_roll_ms: int = 240  # 句子開頭往前多保留的音訊，避免第一個字的開頭被切掉
     idle_flush_s: float = 0.8  # loopback 沒有任何資料進來多久後強制結束當前句
     partial_interval_s: float = 0.7  # 0 = 關閉中間結果

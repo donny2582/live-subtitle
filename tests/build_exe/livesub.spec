@@ -1,14 +1,17 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller 設定檔：由 scripts\build_exe.ps1 呼叫
+# PyInstaller 設定檔：由 tests\build_exe\build_exe.ps1 呼叫
 #
-# PyInstaller 會分析程式用到哪些模組，把 Python 與所有套件打包成 dist\LiveSub\LiveSub.exe，
+# PyInstaller 會分析程式用到哪些模組，把 Python 本身與所有套件打包成 dist\LiveSub\LiveSub.exe，
 # 讓沒有安裝 Python 的電腦也能執行。有些套件是「執行時才載入」或附帶資料檔／DLL，
 # PyInstaller 自動分析找不到，所以要在下面手動列出（hiddenimports、datas、binaries）。
 import os
 
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
 
-ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))  # noqa: F821 - SPECPATH 由 PyInstaller 注入
+# 這個檔案在 <專案>\tests\build_exe\，往上兩層是專案根目錄
+ROOT = os.path.abspath(os.path.join(SPECPATH, "..", ".."))  # noqa: F821 - SPECPATH 由 PyInstaller 注入
+# exe 圖示：build_exe.ps1 會先產生這個檔案（藍底「字」，和系統匣圖示相同）
+ICON = os.path.join(ROOT, "build", "livesub.ico")
 
 datas = []  # 資料檔（例如 OpenCC 的轉換字典）
 binaries = []  # DLL 等二進位檔
@@ -56,6 +59,7 @@ exe = EXE(  # noqa: F821
     [],
     exclude_binaries=True,
     name="LiveSub",
+    icon=ICON if os.path.exists(ICON) else None,
     console=os.environ.get("LIVESUB_CONSOLE") == "1",
     upx=False,
 )

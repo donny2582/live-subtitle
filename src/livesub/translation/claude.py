@@ -4,6 +4,8 @@
   Haiku 5.5 可設 thinking = "off" 完全關閉。
 * 支援伺服器端備援（refusal fallback）的模型會自動帶上 `fallbacks: "default"`：
   主模型拒答時，同一次請求內改由備援模型接手。
+* 定稿翻譯使用串流（messages.stream）：譯文一邊產生一邊顯示在畫面上，
+  不用等整句翻完，中文約可提早 0.5 秒出現。
 
 Claude 不提供語音辨識，只負責翻譯；語音辨識要另外選 Groq、OpenAI 或本機 Whisper。
 金鑰：ANTHROPIC_API_KEY（可在設定視窗的「API 金鑰」分頁填入）。
@@ -13,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from typing import Any
 
 import anthropic
@@ -28,6 +31,7 @@ from .base import (
     build_system_prompt,
     clean_translation,
     token_cost,
+    wrap_source,
 )
 
 log = logging.getLogger(__name__)
@@ -46,6 +50,7 @@ class ClaudeTranslator:
     """用 Anthropic 官方 SDK 呼叫 Claude 翻譯（實作 base.Translator 介面）。"""
 
     is_cloud = True
+    supports_streaming = True  # pipeline 看到這個就會傳 on_delta，讓譯文邊翻邊顯示
 
     def __init__(
         self,
@@ -80,7 +85,7 @@ class ClaudeTranslator:
             "max_tokens": self._cfg.max_tokens,  # 回覆長度上限（含思考）
             "system": build_system_prompt(text, source_lang, partial, self._glossary),
             # 前幾句的原文／譯文 ＋ 這一句原文
-            "messages": [*self._history.as_messages(), {"role": "user", "content": text}],
+            "messages": [*self._history.as_messages(), {"role": "user", "content": wrap_source(text)}],
             # effort：模型要多認真思考；字幕翻譯用 low 最快最省
             "output_config": {"effort": self._cfg.effort},
         }
@@ -88,14 +93,23 @@ class ClaudeTranslator:
             params["thinking"] = {"type": "disabled"}
         return params
 
-    def _create(self, params: dict[str, Any]) -> Any:
-        """送出請求，並把 SDK 的各種錯誤轉成使用者看得懂的 TranslationError。"""
+    def _create(self, params: dict[str, Any], on_delta: Callable[[str], None] | None = None) -> Any:
+        """送出請求，並把 SDK 的各種錯誤轉成使用者看得懂的 TranslationError。
+
+        on_delta 有給的話用串流：每收到一小段譯文，就把「目前為止的譯文」交給 on_delta（給畫面先顯示），
+        最後一樣回傳完整的回應（含用量）。串流途中發生的錯誤也會在這裡轉換。
+        """
+        api = self._client.beta.messages if self._fallback else self._client.messages
+        extra: dict[str, Any] = {"betas": [_FALLBACK_BETA], "fallbacks": "default"} if self._fallback else {}
         try:
-            if self._fallback:
-                return self._client.beta.messages.create(
-                    betas=[_FALLBACK_BETA], fallbacks="default", **params
-                )
-            return self._client.messages.create(**params)
+            if on_delta is None:
+                return api.create(**extra, **params)
+            with api.stream(**extra, **params) as stream:
+                received = ""
+                for piece in stream.text_stream:  # 只會收到文字，不含思考內容
+                    received += piece
+                    on_delta(self._norm(clean_translation(received)))
+                return stream.get_final_message()
         except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as exc:
             raise TranslationError("Claude API 金鑰無效或沒有權限（請設定 ANTHROPIC_API_KEY）") from exc
         except anthropic.RateLimitError as exc:
@@ -107,9 +121,11 @@ class ClaudeTranslator:
         except anthropic.APIConnectionError as exc:  # 含逾時
             raise TranslationError(f"Claude 無回應：{exc}") from exc
 
-    def translate(self, text: str, source_lang: str, partial: bool = False) -> TranslationResult:
+    def translate(self, text: str, source_lang: str, partial: bool = False,
+                  on_delta: Callable[[str], None] | None = None) -> TranslationResult:
+        """翻譯一句。on_delta 有給的話用串流，譯文會邊產生邊交給 on_delta。"""
         t0 = time.perf_counter()
-        resp = self._create(self._params(text, source_lang, partial))
+        resp = self._create(self._params(text, source_lang, partial), on_delta)
         cost = self._record_usage(resp)  # 拒答也會計費，所以先記帳
         # stop_reason 說明模型為什麼停止輸出；refusal = 安全機制拒絕回答
         if resp.stop_reason == "refusal":

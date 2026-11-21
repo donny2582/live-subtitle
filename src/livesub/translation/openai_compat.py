@@ -23,6 +23,7 @@ from .base import (
     build_system_prompt,
     clean_translation,
     token_cost,
+    wrap_source,
 )
 
 
@@ -54,7 +55,7 @@ class OpenAICompatTranslator:
         """對話格式：系統提示詞 → 前幾句（原文／譯文）→ 這一句原文。"""
         system = build_system_prompt(text, source_lang, partial, self._glossary)
         return [{"role": "system", "content": system}, *self._history.as_messages(),
-                {"role": "user", "content": text}]
+                {"role": "user", "content": wrap_source(text)}]
 
     def translate(self, text: str, source_lang: str, partial: bool = False) -> TranslationResult:
         t0 = time.perf_counter()

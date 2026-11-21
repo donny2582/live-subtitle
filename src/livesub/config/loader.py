@@ -136,6 +136,30 @@ def app_base_dir() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
+def is_writable_dir(path: Path) -> bool:
+    """實際建立一個暫存檔測試能不能寫入（只看權限設定在 Windows 上不準）。"""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".livesub_write_test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def user_data_dir(base: Path) -> Path:
+    """存放 config.toml、logs、用量、逐字稿的資料夾。
+
+    * 一般情況：和程式放在一起（base），整個資料夾可以直接帶走（免安裝、可攜）。
+    * 程式放在不能寫入的地方（例如 C:\\Program Files）：改用 %APPDATA%\\LiveSub。
+    """
+    if is_writable_dir(base):
+        return base
+    appdata = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+    return Path(appdata) / "LiveSub"
+
+
 def resolve_path(base: Path, value: str) -> Path | None:
     """把設定中的相對路徑解析為絕對路徑；空字串回傳 None。"""
     if not value:

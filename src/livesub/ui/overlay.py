@@ -33,17 +33,16 @@ from PyQt6.QtGui import (
     QDesktopServices,
     QFont,
     QGuiApplication,
-    QIcon,
     QMouseEvent,
     QPainter,
     QPaintEvent,
-    QPixmap,
     QWheelEvent,
 )
 from PyQt6.QtWidgets import QApplication, QLabel, QMenu, QSystemTrayIcon, QVBoxLayout, QWidget
 
 from ..config import OverlayConfig
 from ..core.models import Stage, SubtitleEvent
+from .icon import make_icon
 
 _STATUS_VISIBLE_S = 6.0  # 狀態文字（黃字）顯示幾秒後隱藏（有字幕時才會隱藏）
 
@@ -306,24 +305,6 @@ class SubtitleOverlay(QWidget):
             self._menu.exec(event.globalPos())
 
 
-def _make_icon() -> QIcon:
-    """用程式畫出系統匣圖示（藍底白色「字」），不需要另外附圖檔。"""
-    pix = QPixmap(64, 64)
-    pix.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pix)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    p.setBrush(QColor("#1f6feb"))
-    p.setPen(Qt.PenStyle.NoPen)
-    p.drawRoundedRect(4, 4, 56, 56, 12, 12)
-    p.setPen(QColor("white"))
-    font = QFont("Microsoft JhengHei UI", 30)
-    font.setWeight(QFont.Weight.Bold)
-    p.setFont(font)
-    p.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, "字")
-    p.end()
-    return QIcon(pix)
-
-
 def open_folder(path: Path) -> None:
     """以檔案總管開啟資料夾。"""
     if sys.platform == "win32":
@@ -389,7 +370,7 @@ class TrayController(QObject):
                 self.menu.addAction(item)
         self.menu.aboutToShow.connect(self._refresh_usage)
 
-        self.tray = QSystemTrayIcon(_make_icon(), app)
+        self.tray = QSystemTrayIcon(make_icon(), app)
         self.tray.setToolTip("即時字幕翻譯")
         self.tray.setContextMenu(self.menu)
         self.tray.activated.connect(self._on_activated)
