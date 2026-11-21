@@ -1,6 +1,11 @@
 """讀寫 Windows「使用者環境變數」（等同 setx），讓設定視窗能直接儲存 API 金鑰。
 
 金鑰存在 HKEY_CURRENT_USER\\Environment，不會寫進 config.toml。
+
+為什麼「先前開的終端機看不到新金鑰」？
+    每個程式啟動時會複製一份當下的環境變數，之後 Windows 裡的值再怎麼改，
+    已經在跑的程式（包含 PowerShell）都不會知道。所以啟動時要用 with_user_env()
+    直接去登錄檔（registry）補讀。
 """
 
 from __future__ import annotations
@@ -24,6 +29,20 @@ def read_user_env(name: str) -> str:
             return str(stored).strip()
     except OSError:
         return ""
+
+
+def with_user_env(env: dict[str, str], names: list[str] | tuple[str, ...]) -> dict[str, str]:
+    """補上 env 裡沒有、但已存在 Windows 使用者環境變數的金鑰。
+
+    設定視窗或 setx 存金鑰後，先前開啟的終端機看不到新值；這裡直接讀登錄檔補齊。
+    """
+    merged = dict(env)
+    for name in names:
+        if name and not merged.get(name, "").strip():
+            value = read_user_env(name)
+            if value:
+                merged[name] = value
+    return merged
 
 
 def set_user_env(name: str, value: str) -> None:
@@ -57,6 +76,7 @@ def _broadcast_change() -> None:
     try:
         import ctypes
 
+        # 對所有視窗廣播 WM_SETTINGCHANGE（和 setx 做的事一樣），最多等 1 秒
         hwnd_broadcast, wm_settingchange, smto_abortifhung = 0xFFFF, 0x001A, 0x0002
         result = ctypes.c_ulong()
         ctypes.windll.user32.SendMessageTimeoutW(  # type: ignore[attr-defined]

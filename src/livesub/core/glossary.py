@@ -7,6 +7,10 @@ CSV 格式（UTF-8，可用 Excel 另存為「CSV UTF-8」）：
     구간단속,區間測速
 
 以 # 開頭的行視為註解。
+
+術語表有兩個用途：
+1. 翻譯：這句出現的術語會附在 LLM 提示詞裡，要求一定要用指定譯法。
+2. 辨識（選用，asr.glossary_prompt = true）：把術語原文提示給語音辨識，專有名詞比較不會聽錯。
 """
 
 from __future__ import annotations
@@ -21,8 +25,10 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class GlossaryEntry:
-    source: str
-    target: str
+    """一筆術語。"""
+
+    source: str  # 原文，例如 "section control"
+    target: str  # 固定譯法，例如 "區間測速"
 
 
 def load_glossary(path: Path) -> list[GlossaryEntry]:
@@ -32,14 +38,14 @@ def load_glossary(path: Path) -> list[GlossaryEntry]:
         FileNotFoundError: 檔案不存在。
     """
     entries: list[GlossaryEntry] = []
-    seen: set[str] = set()
+    seen: set[str] = set()  # 已出現過的原文（不分大小寫），用來找重複
     # utf-8-sig：容忍 Excel 存檔時加入的 BOM
     with path.open(encoding="utf-8-sig", newline="") as fh:
         for lineno, row in enumerate(csv.reader(fh), start=1):
             if not row or not row[0].strip() or row[0].lstrip().startswith("#"):
-                continue
+                continue  # 空行或註解
             if lineno == 1 and [c.strip().lower() for c in row[:2]] == ["source", "target"]:
-                continue
+                continue  # 標題列
             if len(row) < 2 or not row[1].strip():
                 log.warning("術語表第 %d 行格式錯誤，已略過：%r", lineno, row)
                 continue
@@ -56,7 +62,7 @@ def load_glossary(path: Path) -> list[GlossaryEntry]:
 
 def select_relevant(entries: list[GlossaryEntry], text: str) -> list[GlossaryEntry]:
     """只挑出原文中出現的術語，讓提示詞保持精簡（省 token 也省延遲）。"""
-    folded = text.casefold()
+    folded = text.casefold()  # casefold：不分大小寫比對（比 lower() 更完整）
     return [e for e in entries if e.source.casefold() in folded]
 
 
@@ -69,7 +75,10 @@ def render_prompt_section(entries: list[GlossaryEntry]) -> str:
 
 
 def build_asr_prompt(entries: list[GlossaryEntry], max_chars: int = 200) -> str:
-    """把術語原文串成 Whisper initial_prompt，提高專有名詞的辨識率。"""
+    """把術語原文串成 Whisper initial_prompt，提高專有名詞的辨識率。
+
+    Whisper 的提示詞有長度限制，所以最多放 max_chars 個字，超過的術語就不放。
+    """
     out: list[str] = []
     total = 0
     for e in entries:

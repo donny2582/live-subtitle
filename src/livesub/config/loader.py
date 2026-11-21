@@ -1,6 +1,9 @@
 """TOML → AppConfig，並提供路徑與金鑰的共用工具。
 
 未知的鍵會直接報錯，避免拼錯設定名稱卻默默使用預設值。
+
+讀取流程：
+    config.toml ──tomllib──► dict ──_migrate_legacy──► 新格式 dict ──_build──► AppConfig
 """
 
 from __future__ import annotations
@@ -50,6 +53,8 @@ def _migrate_legacy(raw: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         if not isinstance(table, dict):
             continue
         for old, (sub, new) in mapping.items():
+            # 例：[translate] model = "x"  →  [translate.openai] model = "x"
+            # （新格式已經寫了的話以新格式為準，setdefault 不會覆蓋）
             if old in table and not isinstance(table[old], dict):
                 table.setdefault(sub, {}).setdefault(new, table.pop(old))
                 moved.append(f"{section}.{old}")
@@ -68,7 +73,11 @@ def _migrate_legacy(raw: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
 
 
 def _build(cls: type[T], data: Any, path: str) -> T:
-    """遞迴將 dict 轉成 dataclass，並拒絕未知鍵。"""
+    """遞迴將 dict 轉成 dataclass，並拒絕未知鍵。
+
+    遇到欄位型別本身也是 dataclass（例如 AppConfig.asr 是 AsrConfig），就往下一層再轉一次。
+    path 是目前位置（例如 "asr.cloud"），只用在錯誤訊息裡告訴使用者是哪個區段出錯。
+    """
     if not isinstance(data, dict):
         raise ConfigError(f"[{path}] 應為表格（table），實際為 {type(data).__name__}")
     hints = get_type_hints(cls)
@@ -85,7 +94,7 @@ def _build(cls: type[T], data: Any, path: str) -> T:
         if isinstance(hint, type) and is_dataclass(hint):
             value = _build(hint, value, f"{path}.{f.name}" if path else f.name)
         elif isinstance(value, list):
-            value = tuple(value)
+            value = tuple(value)  # list 可以被修改，frozen 設定要用不可修改的 tuple
         kwargs[f.name] = value
     try:
         return cls(**kwargs)
@@ -110,6 +119,7 @@ def load_config(path: Path) -> AppConfig:
 
 
 def load_config_with_notes(path: Path) -> tuple[AppConfig, list[str]]:
+    """同 load_config，但另外回傳「從舊格式自動搬移的鍵」，讓啟動時可以提醒使用者。"""
     try:
         with path.open("rb") as fh:
             raw = tomllib.load(fh)
@@ -122,13 +132,39 @@ def app_base_dir() -> Path:
     """程式的基準資料夾：打包成 .exe 時為 exe 所在資料夾；開發時為專案根目錄。"""
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
+    # 這個檔案在 <專案>/src/livesub/config/loader.py，往上 3 層就是專案根目錄
     return Path(__file__).resolve().parents[3]
+
+
+def is_writable_dir(path: Path) -> bool:
+    """實際建立一個暫存檔測試能不能寫入（只看權限設定在 Windows 上不準）。"""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".livesub_write_test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def user_data_dir(base: Path) -> Path:
+    """存放 config.toml、logs、用量、逐字稿的資料夾。
+
+    * 一般情況：和程式放在一起（base），整個資料夾可以直接帶走（免安裝、可攜）。
+    * 程式放在不能寫入的地方（例如 C:\\Program Files）：改用 %APPDATA%\\LiveSub。
+    """
+    if is_writable_dir(base):
+        return base
+    appdata = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+    return Path(appdata) / "LiveSub"
 
 
 def resolve_path(base: Path, value: str) -> Path | None:
     """把設定中的相對路徑解析為絕對路徑；空字串回傳 None。"""
     if not value:
         return None
+    # 支援 %USERPROFILE%、$HOME、~ 這類寫法
     p = Path(os.path.expandvars(value)).expanduser()
     return p if p.is_absolute() else (base / p)
 

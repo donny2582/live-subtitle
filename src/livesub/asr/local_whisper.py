@@ -2,6 +2,9 @@
 
 * 逐句自動偵測語言，並限制在允許清單內（預設 en/ja/ko/zh）。
 * GPU 載入失敗時自動改用 CPU 與較小模型。
+
+faster-whisper 是 OpenAI Whisper 模型的加速版，完全在自己的電腦上執行，
+不需要網路與金鑰、不花錢，會議內容也不會外傳；缺點是沒有 NVIDIA 顯示卡時會比較慢。
 """
 
 from __future__ import annotations
@@ -31,9 +34,9 @@ class WhisperTranscriber:
         self._cfg = cfg.local
         self._model_dir = model_dir
         self._prompt = prompt or None
-        self._model: Any = None
-        self.device: str = "cpu"
-        self.model_name: str = self._cfg.model
+        self._model: Any = None  # load() 之後才有值
+        self.device: str = "cpu"  # 實際使用的裝置（cuda = NVIDIA 顯示卡）
+        self.model_name: str = self._cfg.model  # 實際載入的模型（GPU 失敗時會換成小模型）
         self._lang = LanguageTracker(cfg.allowed_languages, cfg.sticky_language_prob)
 
     @property
@@ -42,10 +45,12 @@ class WhisperTranscriber:
 
     @property
     def realtime_partials(self) -> bool:
+        """只有 GPU 夠快，能每 0.7 秒重新辨識一次產生中間結果。"""
         return self.device == "cuda"
 
     # ------------------------------------------------------------------ 載入
     def _resolve_device(self) -> tuple[str, str]:
+        """決定用 GPU 還是 CPU，以及運算精度（GPU 用 float16、CPU 用 int8 比較快）。"""
         ct = self._cfg.compute_type
         if self._cfg.device in {"auto", "cuda"}:
             try:
@@ -70,12 +75,15 @@ class WhisperTranscriber:
             ) from exc
 
         device, compute = self._resolve_device()
+        # CPU 跑大模型會跟不上即時，所以沒有 GPU 時改用 cpu_model（預設 small）
         name = self._cfg.model if device == "cuda" else self._cfg.cpu_model
         root = str(self._model_dir) if self._model_dir else None
         try:
             self._model = WhisperModel(name, device=device, compute_type=compute, download_root=root)
             self._warmup()
         except Exception as exc:
+            # GPU 載入失敗（常見原因：缺 CUDA DLL、顯示卡記憶體不足）→ 自動退回 CPU
+            # 但如果使用者明確指定 cuda，就照實回報錯誤
             if device != "cuda" or self._cfg.device == "cuda":
                 raise AsrUnavailableError(f"無法載入 Whisper 模型 {name}：{exc}") from exc
             log.warning("GPU 載入失敗（%s），改用 CPU 與 %s 模型", exc, self._cfg.cpu_model)
@@ -86,28 +94,32 @@ class WhisperTranscriber:
         log.info("Whisper 模型就緒：%s（%s / %s）", name, device, compute)
 
     def _warmup(self) -> None:
+        """先辨識一秒的微弱雜音：讓模型完成初始化，第一句真正的話才不會特別慢。"""
         noise = (np.random.default_rng(0).standard_normal(16_000) * 1e-3).astype(np.float32)
         segments, _ = self._model.transcribe(noise, language="en", beam_size=1, vad_filter=False)
         list(segments)
 
     # ------------------------------------------------------------------ 辨識
     def _run(self, audio: AudioArray, language: str | None) -> tuple[list[Any], Any]:
+        """呼叫 faster-whisper。language=None 代表讓模型自己判斷語言。"""
         segments, info = self._model.transcribe(
             audio,
             language=language,
             beam_size=self._cfg.beam_size,
-            vad_filter=True,
+            vad_filter=True,  # 模型內建再過濾一次靜音段
             vad_parameters={"min_silence_duration_ms": 500},
-            condition_on_previous_text=False,
-            without_timestamps=True,
+            condition_on_previous_text=False,  # 不參考前文：避免一句幻覺連帶影響後面
+            without_timestamps=True,  # 不需要逐字時間，關掉比較快
             initial_prompt=self._prompt,
             no_speech_threshold=self._cfg.no_speech_threshold,
             log_prob_threshold=self._cfg.log_prob_threshold,
             compression_ratio_threshold=self._cfg.compression_ratio_threshold,
         )
+        # segments 是「用到才計算」的產生器，list() 讓它在這裡一次算完
         return list(segments), info
 
     def _keep(self, seg: Any) -> bool:
+        """這個片段可信嗎？不像語音又信心低、或文字重複度太高（幻覺）的片段丟掉。"""
         cfg = self._cfg
         if seg.no_speech_prob > cfg.no_speech_threshold and seg.avg_logprob < cfg.log_prob_threshold:
             return False
@@ -136,6 +148,7 @@ class WhisperTranscriber:
                 log.debug("seq=%d 非允許語言，略過", utt.seq)
                 return None
             if lang != info.language:
+                # 最後採用的語言和模型判斷的不同（例如改用上一句的語言）→ 指定語言重新辨識
                 segments, _ = self._run(utt.audio, lang)
 
         text = join_segments([s.text for s in segments if self._keep(s)], lang)

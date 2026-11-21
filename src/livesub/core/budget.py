@@ -2,6 +2,12 @@
 
 各雲端服務自行依單價算出花費後呼叫 `record()`；帳本只負責累計與判斷上限。
 用量以月份（本地時間 YYYY-MM）為單位寫入 JSON，跨工作階段累計。
+
+usage_ledger.json 的樣子：
+    {"2026-11": {"cost_usd": 0.42, "asr_cost_usd": 0.08, "requests": 1200, ...}}
+
+注意：這裡的金額是程式「依設定檔單價估算」的，不是服務商的帳單；
+換模型時一定要同步修改單價，否則預算計算會不準。
 """
 
 from __future__ import annotations
@@ -23,17 +29,23 @@ log = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class MonthUsage:
-    input_tokens: int = 0
-    output_tokens: int = 0
-    chars: int = 0
-    requests: int = 0
-    cost_usd: float = 0.0  # 合計
-    audio_seconds: float = 0.0
-    asr_cost_usd: float = 0.0
+    """一個月的累計用量。"""
+
+    input_tokens: int = 0  # LLM 翻譯：送出的 token
+    output_tokens: int = 0  # LLM 翻譯：收到的 token
+    chars: int = 0  # DeepL：翻譯的字元數
+    requests: int = 0  # 雲端請求次數
+    cost_usd: float = 0.0  # 合計（辨識＋翻譯）
+    audio_seconds: float = 0.0  # 語音辨識：送出的音訊秒數
+    asr_cost_usd: float = 0.0  # 其中語音辨識的花費
 
 
 class BudgetLedger:
-    """執行緒安全的用量帳本。"""
+    """執行緒安全的用量帳本。
+
+    辨識與翻譯在不同執行緒同時記帳，所以用 Lock 保護資料。
+    為了不每句都寫硬碟，最多每 10 秒存一次；程式結束時再強制存檔。
+    """
 
     def __init__(
         self,
@@ -44,16 +56,18 @@ class BudgetLedger:
     ) -> None:
         self._cfg = cfg
         self._path = path
+        # 取得「目前月份」的函式（測試時可換成固定月份）
         self._month_fn = month_fn or (lambda: datetime.now().strftime("%Y-%m"))
         self._save_interval = save_interval_s
         self._lock = threading.Lock()
-        self._data: dict[str, MonthUsage] = {}
-        self._dirty = False
+        self._data: dict[str, MonthUsage] = {}  # {"2026-11": MonthUsage(...)}
+        self._dirty = False  # 有新資料還沒存檔
         self._last_save = 0.0
         self._load()
 
     # ------------------------------------------------------------------ 持久化
     def _load(self) -> None:
+        """讀取先前的用量；檔案壞掉時先備份再從 0 開始，不讓程式無法啟動。"""
         if not self._path or not self._path.exists():
             return
         try:
@@ -78,6 +92,7 @@ class BudgetLedger:
             payload = {k: asdict(v) for k, v in self._data.items()}
             self._dirty = False
             self._last_save = time.monotonic()
+        # 寫檔比較慢，在鎖外面做，避免卡住其他執行緒記帳
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self._path.with_suffix(".tmp")
@@ -88,6 +103,7 @@ class BudgetLedger:
 
     # ------------------------------------------------------------------ 計量
     def _current(self) -> MonthUsage:
+        """本月的用量（新的月份會自動從 0 開始）。呼叫前要先拿到鎖。"""
         return self._data.setdefault(self._month_fn(), MonthUsage())
 
     def record(
@@ -115,6 +131,7 @@ class BudgetLedger:
         return cost_usd
 
     def month_usage(self) -> MonthUsage:
+        """本月用量的複本（給畫面顯示用，改了複本也不影響帳本）。"""
         with self._lock:
             u = self._current()
             return MonthUsage(**asdict(u))
@@ -126,10 +143,12 @@ class BudgetLedger:
             return True  # 0 代表不設上限
         with self._lock:
             spent = self._current().cost_usd
+        # 例：上限 5 美元、cutoff 0.7 → 花到 3.5 美元時停中間結果，花到 5 美元時全部停
         threshold = limit * (self._cfg.partial_cutoff_ratio if partial else 1.0)
         return spent < threshold
 
     def summary(self) -> str:
+        """系統匣選單最下方顯示的那一行文字。"""
         u = self.month_usage()
         limit = self._cfg.monthly_limit_usd
         cap = f" / ${limit:.2f}" if limit > 0 else ""

@@ -76,8 +76,9 @@ def update_toml_text(text: str, updates: Mapping[str, Any]) -> str:
     已存在的鍵就地替換（保留註解）；不存在的鍵加到該區段最後一個設定之後；
     區段不存在則附加到檔案結尾。
     """
-    newline = "\r\n" if "\r\n" in text else "\n"
+    newline = "\r\n" if "\r\n" in text else "\n"  # 沿用原檔的換行格式（Windows 是 \r\n）
     lines = text.splitlines()
+    # pending：還沒寫進去的更新，{區段: {鍵: TOML 字面值}}；寫入後就從這裡移除
     pending: dict[str, dict[str, str]] = {}
     for dotted, value in updates.items():
         section, _, key = dotted.rpartition(".")
@@ -85,8 +86,9 @@ def update_toml_text(text: str, updates: Mapping[str, Any]) -> str:
             raise ValueError(f"設定鍵需包含區段：{dotted}")
         pending.setdefault(section, {})[key] = format_value(value)
 
+    # 逐行掃描：記住目前在哪個 [區段]，遇到要更新的鍵就就地替換數值
     current: str | None = None
-    last_key_line: dict[str, int] = {}
+    last_key_line: dict[str, int] = {}  # 每個區段最後一個設定在第幾行（新鍵要插在它後面）
     for i, line in enumerate(lines):
         h = _HEADER.match(line)
         if h:
@@ -126,9 +128,10 @@ def save_config_updates(path: Path, updates: Mapping[str, Any]) -> None:
     text = path.read_text(encoding="utf-8") if path.exists() else ""
     new_text = update_toml_text(text, updates)
     try:
-        parse_config(tomllib.loads(new_text))
+        parse_config(tomllib.loads(new_text))  # 先驗證：不合法就丟出例外，不會寫檔
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"更新後不是合法的 TOML：{exc}") from exc
+    # 先寫到暫存檔再整個替換：寫到一半當機也不會留下壞掉的設定檔
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(new_text, encoding="utf-8", newline="")
     os.replace(tmp, path)

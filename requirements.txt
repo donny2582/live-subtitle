@@ -1,9 +1,29 @@
-# 核心執行套件（雲端語音辨識＋雲端翻譯；Windows 10/11，Python 3.11~3.14）
-PyAudioWPatch>=0.2.12 ; sys_platform == "win32"
-webrtcvad-wheels>=2.0.14
-soxr>=0.5
-numpy>=1.26
-PyQt6>=6.7
-requests>=2.32
-opencc-python-reimplemented>=0.1.7
-anthropic>=2.11,<3
+annotated-types==0.8.0
+anthropic==2.12.0
+anyio==4.16.0
+certifi==2026.11.20
+charset-normalizer==3.5.2
+docstring_parser==0.18.0
+h11==0.16.0
+httpcore2==2.16.2
+httpx2==2.16.2
+idna==3.20
+jiter==0.19.0
+-e git+https://github.com/donny2582/live-subtitle.git@f9ce68527cfadc70d803a473e244c0b215bfc61a#egg=livesub
+numpy==2.5.5
+opencc-python-reimplemented==0.1.7
+opentelemetry-api==1.45.2
+PyAudioWPatch==0.2.12.9
+pydantic==2.14.4
+pydantic_core==2.50.5
+PyQt6==6.12.1
+PyQt6-Qt6==6.12.0
+PyQt6_sip==13.13.1
+requests==2.34.2
+sniffio==1.3.1
+soxr==1.1.0
+truststore==0.10.5
+typing-inspection==0.4.5
+typing_extensions==4.16.0
+urllib3==2.8.0
+webrtcvad-wheels==2.0.14.post1

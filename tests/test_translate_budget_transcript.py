@@ -56,6 +56,12 @@ def ok(content: str, pt: int = 100, ct: int = 20) -> FakeResp:
         ("<think>hmm</think>\n你好", "你好"),
         ('"他說「好」"', '他說「好」'),
         ("「A」和「B」", "「A」和「B」"),
+        ("<source>你好</source>", "你好"),  # 照抄標籤
+        ("政府宣布新政策。\n註：該新聞內容需要查核", "政府宣布新政策。"),  # 整行附註
+        ("政府宣布新政策（註：以上內容需查核）", "政府宣布新政策"),  # 句尾括號附註
+        ("譯註：原文有誤\n他明天出發", "他明天出發"),
+        ("注意：前方施工", "注意：前方施工"),  # 講者真的說「注意」不能刪
+        ("請看第三頁（附錄）", "請看第三頁（附錄）"),  # 一般括號保留
     ],
 )
 def test_clean_translation(raw, expected):
@@ -75,12 +81,16 @@ def test_openai_translator_context_glossary_and_cost(tmp_path):
     assert res.cost_usd == pytest.approx((1000 * 0.4 + 100 * 1.6) / 1e6)
     system = session.calls[0]["json"]["messages"][0]["content"]
     assert "section control → 區間測速" in system and "speed camera" not in system
+    assert "不要加任何評論" in system  # 禁止額外內容的規則
+    user_msg = session.calls[0]["json"]["messages"][-1]["content"]
+    assert user_msg == "<source>We discuss section control</source>"  # 原文用標籤包起來
     assert "英文" in system
     assert session.headers["Authorization"] == "Bearer sk-test"
 
     tr.translate("Next one", "en")
     msgs = session.calls[1]["json"]["messages"]
     assert [m["role"] for m in msgs] == ["system", "user", "assistant", "user"]  # 帶入上下文
+    assert msgs[1]["content"] == "<source>We discuss section control</source>"  # 上下文的原文也加標籤
     ledger.save()
     saved = json.loads((tmp_path / "u.json").read_text(encoding="utf-8"))
     assert saved["2026-11"]["requests"] == 2

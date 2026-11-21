@@ -23,6 +23,10 @@
 - Python 3.11～3.14（建議 3.12）
 - 雲端模式（預設）：不需要 GPU，只要網路與 API 金鑰
 - 本機模式（選用）：建議 NVIDIA 顯示卡（VRAM 4 GB 以上）
+```powershell
+# 直接告訴腳本要用哪個 Python，跳過自動尋找。你的 python 就是 3.13，可以直接用：
+powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 -Python python
+```
 
 ## 2. 安裝（開發者模式）
 
@@ -57,7 +61,7 @@ setx ANTHROPIC_API_KEY "sk-ant-..."   # translate.engine = "claude" 時
 不想改檔案的話，用設定視窗就好：
 
 - 程式執行中：**右鍵字幕**或**系統匣「字」圖示** →「設定…」
-- 還沒啟動前：`scripts\run.ps1 -Settings`（只開設定視窗）
+- 還沒啟動前：`scripts\run.ps1 -Settings`/`powershell -ExecutionPolicy Bypass -File scripts\run.ps1 -Settings`（只開設定視窗）
 
 | 分頁 | 可以調整 |
 |---|---|

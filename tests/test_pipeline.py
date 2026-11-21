@@ -51,9 +51,24 @@ class FakeTranslator:
         return TranslationResult(("[暫]" if partial else "") + f"譯:{text}", 0.01)
 
 
-def run_pipeline(tmp_path, asr, translator, signal: np.ndarray) -> list[SubtitleEvent]:
+class StreamingTranslator(FakeTranslator):
+    """模擬會串流的翻譯器：先送出一半的譯文，再回傳完整結果。"""
+
+    supports_streaming = True
+
+    def translate(self, text: str, source_lang: str, partial: bool = False,
+                  on_delta=None) -> TranslationResult:
+        full = f"譯:{text}"
+        if on_delta:
+            on_delta(full[: len(full) // 2])
+        return TranslationResult(full, 0.01)
+
+
+def run_pipeline(tmp_path, asr, translator, signal: np.ndarray,
+                 partials: str = "auto") -> list[SubtitleEvent]:
     cfg = replace(AppConfig(), translate=replace(TranslateConfig(), partial_min_interval_s=0.0,
                                                  partial_min_new_chars=0))
+    cfg = replace(cfg, asr=replace(cfg.asr, partial_results=partials))
     events: list[SubtitleEvent] = []
     lock = threading.Lock()
 
@@ -120,3 +135,15 @@ def test_latest_only_and_throttle():
     assert th.should_translate(1, "abcdefg", now=2.0)
     th.forget(1)
     assert th.should_translate(1, "a", now=2.1)
+
+
+def test_source_shown_before_translation_and_streamed(tmp_path):
+    # 雲端辨識預設沒有中間結果；原文仍要在翻譯完成前先出現，譯文要先出現一半
+    signal = np.concatenate([tone(1.0), silence(1.0), tone(1.0), silence(1.0)])
+    events = run_pipeline(tmp_path, FakeAsr(), StreamingTranslator(), signal, partials="off")
+    for seq in (1, 2):
+        stages = [e.stage for e in events if e.seq == seq]
+        assert stages == [Stage.PARTIAL_SOURCE, Stage.PARTIAL_TRANSLATION, Stage.FINAL]
+        streamed = next(e for e in events if e.seq == seq and e.stage is Stage.PARTIAL_TRANSLATION)
+        final = next(e for e in events if e.seq == seq and e.stage is Stage.FINAL)
+        assert final.translated_text.startswith(streamed.translated_text)

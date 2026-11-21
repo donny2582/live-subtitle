@@ -9,6 +9,14 @@
     [translate.openai] / [translate.claude] / [translate.deepl]
 
 新增雲端服務時：在這裡加一個子區段 dataclass，並在對應的 registry 註冊即可。
+
+閱讀提示：
+* 每個 class 對應 config.toml 的一個 [區段]，class 裡的欄位就是區段裡的設定名稱，
+  `=` 後面是預設值（config.toml 沒寫的項目就用這個值）。
+* `@dataclass(frozen=True)`：自動產生建構子，而且建立後不能修改，
+  多個執行緒同時讀取也安全。要「修改」時用 dataclasses.replace() 產生新副本。
+* `__post_init__`：物件建立後自動執行，用 _check() 檢查數值是否合理，
+  不合理就丟出 ConfigError，程式啟動時會顯示「設定檔錯誤：…」。
 """
 
 from __future__ import annotations
@@ -38,6 +46,7 @@ class ConfigError(ValueError):
 
 
 def _check(condition: bool, message: str) -> None:
+    """條件不成立就丟出 ConfigError（message 會直接顯示給使用者看）。"""
     if not condition:
         raise ConfigError(message)
 
@@ -47,28 +56,33 @@ def _check(condition: bool, message: str) -> None:
 class AudioConfig:
     """音訊擷取設定。"""
 
-    source: str = "loopback"  # loopback = 系統播放的聲音；mic = 麥克風
-    device_index: int = -1  # -1 = 自動使用預設裝置
-    target_sample_rate: int = 16_000
+    source: str = "loopback"  # loopback = 系統播放的聲音；mic = 麥克風；both = 兩者混音
+    device_index: int = -1  # -1 = 自動使用預設裝置（both 時指系統聲音的 loopback 裝置）
+    mic_device_index: int = -1  # 只在 both 時使用：麥克風裝置，-1 = 預設麥克風
+    target_sample_rate: int = 16_000  # 語音辨識模型都用 16 kHz，擷取後會轉成這個取樣率
     max_queue_chunks: int = 400  # 約 20 秒的緩衝（每塊 50 ms）
 
     def __post_init__(self) -> None:
-        _check(self.source in {"loopback", "mic"}, "audio.source 只能是 loopback 或 mic")
+        _check(self.source in {"loopback", "mic", "both"}, "audio.source 只能是 loopback、mic 或 both")
         _check(self.target_sample_rate == 16_000, "audio.target_sample_rate 目前僅支援 16000")
         _check(self.max_queue_chunks >= 20, "audio.max_queue_chunks 至少 20")
 
 
 @dataclass(frozen=True, slots=True)
 class SegmenterConfig:
-    """VAD 切句設定。"""
+    """VAD 切句設定。
 
-    frame_ms: int = 30
+    VAD（Voice Activity Detection，語音活動偵測）：判斷每一小段聲音「是不是人在說話」，
+    用來找出一句話從哪裡開始、到哪裡結束。
+    """
+
+    frame_ms: int = 30  # VAD 每次判斷的音訊長度（webrtcvad 只接受 10/20/30 毫秒）
     vad_aggressiveness: int = 2  # 0~3，越大越嚴格（背景音樂多時調高）
-    min_speech_ms: int = 300
-    end_silence_ms: int = 600  # 靜音多久視為一句結束
+    min_speech_ms: int = 300  # 連續說話至少這麼久才算一句開始（過濾咳嗽、雜音）
+    end_silence_ms: int = 450  # 靜音多久視為一句結束（越短字幕越快出現，但句子容易被切碎）
     soft_end_silence_ms: int = 250  # 句子偏長時改用較短靜音門檻，避免硬切在字中間
-    max_utterance_s: float = 10.0
-    pre_roll_ms: int = 240
+    max_utterance_s: float = 5.0  # 一句最長秒數，超過就強制切開（要等整句講完才處理，太長會延遲）
+    pre_roll_ms: int = 240  # 句子開頭往前多保留的音訊，避免第一個字的開頭被切掉
     idle_flush_s: float = 0.8  # loopback 沒有任何資料進來多久後強制結束當前句
     partial_interval_s: float = 0.7  # 0 = 關閉中間結果
 
@@ -89,12 +103,13 @@ class LocalAsrConfig:
     cpu_model: str = "small"  # 沒有 GPU 時改用的模型
     device: str = "auto"  # auto / cuda / cpu
     compute_type: str = "auto"  # auto = GPU 用 float16，CPU 用 int8
-    model_dir: str = "models"
-    beam_size: int = 1
-    min_allowed_language_prob: float = 0.05
-    no_speech_threshold: float = 0.6
-    log_prob_threshold: float = -1.0
-    compression_ratio_threshold: float = 2.4
+    model_dir: str = "models"  # 模型下載位置
+    beam_size: int = 1  # 搜尋寬度；1 最快，調大會稍準但變慢
+    min_allowed_language_prob: float = 0.05  # 允許語言中最高機率低於此值時，視為不是目標語言
+    # 以下三個是 Whisper 判斷「這段不是語音／結果不可信」的門檻，用來減少幻覺文字
+    no_speech_threshold: float = 0.6  # 「沒有人在說話」機率高於此值就捨棄
+    log_prob_threshold: float = -1.0  # 平均信心低於此值就捨棄
+    compression_ratio_threshold: float = 2.4  # 文字重複度太高（例如同一句一直重複）就捨棄
 
     def __post_init__(self) -> None:
         _check(self.device in {"auto", "cuda", "cpu"}, "asr.local.device 只能是 auto、cuda、cpu")
@@ -110,8 +125,8 @@ class CloudAsrConfig:
     api_key_env: str = "OPENAI_API_KEY"
     # auto = whisper 系列模型用 verbose_json（會回傳語言），其他用 json（語言由文字判斷）
     response_format: str = "auto"
-    timeout_s: float = 10.0
-    max_retries: int = 1
+    timeout_s: float = 10.0  # 等候回應的上限秒數
+    max_retries: int = 1  # 失敗（逾時、伺服器錯誤）時重試幾次
     usd_per_minute: float = 0.003  # 依實際模型價格填寫，供預算計算
     min_billed_s: float = 0.0  # 每次請求最少計費秒數（Groq 為 10 秒）
 
@@ -133,7 +148,7 @@ class AsrConfig:
     glossary_prompt: bool = False  # 把術語原文當作辨識提示詞
     # auto = 只有本機 GPU 才開啟（雲端每次中間結果都要重送整段音訊，費用約變 4 倍）
     partial_results: str = "auto"
-    max_backlog: int = 4
+    max_backlog: int = 4  # 最多累積幾句等待辨識；超過就丟掉最舊的（顯示「辨識跟不上」）
     local: LocalAsrConfig = field(default_factory=LocalAsrConfig)
     cloud: CloudAsrConfig = field(default_factory=CloudAsrConfig)
 
@@ -153,7 +168,8 @@ class OpenAIConfig:
     api_key_env: str = "OPENAI_API_KEY"
     timeout_s: float = 8.0
     max_retries: int = 1
-    temperature: float = 0.2
+    temperature: float = 0.2  # 隨機程度；翻譯要穩定，所以設低
+    # 單價（美元／每百萬 token），供預算計算；token 大約是「字詞片段」，中文約 1 字 1~2 token
     input_usd_per_million_tokens: float = 0.40
     output_usd_per_million_tokens: float = 1.60
 
@@ -199,10 +215,10 @@ class TranslateConfig:
     """翻譯共用設定。"""
 
     engine: str = "openai"  # openai / claude / deepl / none
-    context_turns: int = 3
-    partial_translation: bool = True
-    partial_min_interval_s: float = 1.2
-    partial_min_new_chars: int = 6
+    context_turns: int = 3  # 翻譯時附上前幾句當參考，讓前後用詞一致
+    partial_translation: bool = True  # 句子講到一半就先翻譯（較即時，費用較高）
+    partial_min_interval_s: float = 1.2  # 同一句的中間結果至少隔幾秒才再翻一次
+    partial_min_new_chars: int = 6  # 同一句至少多出幾個字才再翻一次
     taiwan_convert: bool = True  # 使用 OpenCC s2twp 統一成台灣用語
     glossary_path: str = "glossary.csv"
     openai: OpenAIConfig = field(default_factory=OpenAIConfig)
@@ -220,9 +236,9 @@ class TranslateConfig:
 class BudgetConfig:
     """雲端費用控管（語音辨識＋翻譯合計）。各服務單價寫在各自的區段。"""
 
-    monthly_limit_usd: float = 5.0
+    monthly_limit_usd: float = 5.0  # 每月上限；0 = 不限制
     partial_cutoff_ratio: float = 0.7  # 用到預算 70% 後停止中間結果的雲端請求
-    ledger_path: str = "usage_ledger.json"
+    ledger_path: str = "usage_ledger.json"  # 記錄本月已花費金額的檔案
 
     def __post_init__(self) -> None:
         _check(self.monthly_limit_usd >= 0, "budget.monthly_limit_usd 不可為負")
@@ -233,16 +249,16 @@ class BudgetConfig:
 class OverlayConfig:
     """字幕浮層外觀。"""
 
-    show_source: bool = True
-    font_family: str = "Microsoft JhengHei UI"
-    font_size: int = 26
-    source_font_size: int = 15
-    max_lines: int = 2
-    width_ratio: float = 0.7
-    bottom_margin: int = 90
-    bg_opacity: float = 0.6
-    click_through: bool = False
-    clear_after_s: float = 8.0
+    show_source: bool = True  # 譯文上方是否顯示原文小字
+    font_family: str = "Microsoft JhengHei UI"  # 微軟正黑體
+    font_size: int = 26  # 中文字級
+    source_font_size: int = 15  # 原文字級
+    max_lines: int = 2  # 同時顯示幾句
+    width_ratio: float = 0.7  # 字幕寬度佔螢幕寬度的比例
+    bottom_margin: int = 90  # 離螢幕底部幾個像素
+    bg_opacity: float = 0.6  # 背景不透明度（0 = 全透明，1 = 全黑）
+    click_through: bool = False  # 點擊穿透：滑鼠可以點到字幕後面的視窗
+    clear_after_s: float = 8.0  # 幾秒沒有新字幕就清除畫面
 
     def __post_init__(self) -> None:
         _check(0.2 <= self.width_ratio <= 1.0, "overlay.width_ratio 須介於 0.2~1.0")
@@ -254,16 +270,16 @@ class OverlayConfig:
 class OutputConfig:
     """逐字稿輸出設定。"""
 
-    transcript_dir: str = "transcripts"
-    write_srt: bool = True
-    write_txt: bool = True
-    write_jsonl: bool = True
-    srt_include_source: bool = True
+    transcript_dir: str = "transcripts"  # 每次啟動會在這裡建立一個「日期_時間」子資料夾
+    write_srt: bool = True  # 字幕檔（可搭配錄影檔播放）
+    write_txt: bool = True  # 易讀版逐字稿
+    write_jsonl: bool = True  # 機器可讀，一行一句 JSON
+    srt_include_source: bool = True  # SRT 字幕裡是否也放原文
 
 
 @dataclass(frozen=True, slots=True)
 class AppConfig:
-    """整體設定。"""
+    """整體設定：config.toml 讀進來後的完整樣子，程式各處用 cfg.audio、cfg.asr… 取用。"""
 
     audio: AudioConfig = field(default_factory=AudioConfig)
     segmenter: SegmenterConfig = field(default_factory=SegmenterConfig)

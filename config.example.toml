@@ -11,12 +11,14 @@
 
 [audio]
 source = "loopback"        # loopback = 擷取電腦播放的聲音（會議、影片）；mic = 麥克風
+                           # both = 兩者混音（會議中對方＋自己都翻譯；請戴耳機，否則同一句會被收兩次）
 device_index = -1          # -1 = 預設喇叭／耳機；用 run.ps1 -ListDevices 查詢編號
+mic_device_index = -1      # 只在 source = "both" 時使用：麥克風編號，-1 = 預設麥克風
 
 [segmenter]
 vad_aggressiveness = 2     # 0~3，背景音樂或雜音多時調高
-end_silence_ms = 600       # 停頓多久算一句結束；講者語速慢可調高到 800
-max_utterance_s = 10.0     # 一句最長秒數，超過會強制切開
+end_silence_ms = 450       # 停頓多久算一句結束；句子太碎可調高到 600~800
+max_utterance_s = 5.0      # 一句最長秒數，超過會強制切開；越短字幕越快出現
 partial_interval_s = 0.7   # 中間結果更新頻率（秒），0 = 關閉
 
 # ---------------------------------------------------------------- 語音辨識
