@@ -6,6 +6,14 @@
 
 新增欄位的方法：在對應分頁的 `_build_*` 方法加一個元件，並用 `self._bind(...)`
 指定它對應的設定鍵（例如 "overlay.font_size"），存檔時會自動比對並寫入。
+
+存檔流程：
+    每個元件在 self._bindings 登記「設定鍵 → 讀取目前值的函式」
+    → 按「儲存」時 collect_updates() 逐一比對，只收集有改變的項目
+    → save_config_updates() 寫回 config.toml（保留註解）
+    → 通知 app.py（on_saved），外觀立即套用、其他設定詢問是否重新啟動
+
+四個分頁：服務與費用、API 金鑰、音訊與斷句、字幕外觀（各由一個 _build_* 方法建立）。
 """
 
 from __future__ import annotations
@@ -58,6 +66,7 @@ _LANGUAGES = (("en", "英文"), ("ja", "日文"), ("ko", "韓文"), ("zh", "中�
 
 
 def _hint(text: str) -> QLabel:
+    """灰色的說明小字。"""
     lbl = QLabel(text)
     lbl.setWordWrap(True)
     lbl.setStyleSheet("color: palette(placeholder-text);")
@@ -86,6 +95,7 @@ class SettingsDialog(QDialog):
             self._cfg = AppConfig()
         # 設定鍵 → 讀取元件目前值的函式
         self._bindings: dict[str, Callable[[], Any]] = {}
+        # 金鑰名稱 → (狀態文字, 輸入框)
         self._key_rows: dict[str, tuple[QLabel, QLineEdit]] = {}
 
         tabs = QTabWidget(self)
@@ -119,6 +129,7 @@ class SettingsDialog(QDialog):
 
     # ================================================================== 分頁：服務
     def _build_services(self) -> QWidget:
+        """「服務與費用」分頁：選辨識／翻譯服務、翻譯選項、每月預算。"""
         page = QWidget()
         lay = QVBoxLayout(page)
 
@@ -168,6 +179,7 @@ class SettingsDialog(QDialog):
         return page
 
     def _preset_combo(self, presets: tuple[Preset, ...]) -> QComboBox:
+        """服務下拉選單。目前設定不符合任何選項時，多加一個「自訂」並選它。"""
         combo = QComboBox()
         for p in presets:
             combo.addItem(p.label)
@@ -176,16 +188,18 @@ class SettingsDialog(QDialog):
             combo.addItem("自訂（保留設定檔目前的內容）")
             idx = combo.count() - 1
         combo.setCurrentIndex(idx)
-        combo.setProperty("initial", idx)
+        combo.setProperty("initial", idx)  # 記住一開始的選項，存檔時判斷有沒有改
         combo.currentIndexChanged.connect(self._refresh_cost)
         return combo
 
     @staticmethod
     def _selected(combo: QComboBox, presets: tuple[Preset, ...]) -> Preset | None:
+        """目前選的服務；選「自訂」時回傳 None。"""
         i = combo.currentIndex()
         return presets[i] if 0 <= i < len(presets) else None
 
     def _refresh_cost(self) -> None:
+        """換服務時更新說明文字、2 小時費用估算，以及金鑰分頁的紅字提示。"""
         asr = self._selected(self._asr, ASR_PRESETS)
         tr = self._selected(self._tr, TRANSLATE_PRESETS)
         self._asr_tip.setText(asr.tip if asr else "使用 config.toml 裡 [asr] 的設定。")
@@ -196,6 +210,7 @@ class SettingsDialog(QDialog):
 
     # ================================================================== 分頁：金鑰
     def _build_keys(self) -> QWidget:
+        """「API 金鑰」分頁：每把金鑰一列（狀態、輸入框、儲存、清除）。"""
         page = QWidget()
         lay = QVBoxLayout(page)
         lay.addWidget(_hint(
@@ -206,9 +221,10 @@ class SettingsDialog(QDialog):
         for env, desc in API_KEYS:
             status = QLabel()
             edit = QLineEdit()
-            edit.setEchoMode(QLineEdit.EchoMode.Password)
+            edit.setEchoMode(QLineEdit.EchoMode.Password)  # 輸入時顯示成 ●●●
             edit.setPlaceholderText("貼上新的金鑰")
             save = QPushButton("儲存")
+            # e=env：把「這一列的金鑰名稱」固定在 lambda 裡（否則迴圈結束後全部會變成最後一個）
             save.clicked.connect(lambda _=False, e=env: self._save_key(e))
             clear = QPushButton("清除")
             clear.clicked.connect(lambda _=False, e=env: self._save_key(e, clear=True))
@@ -227,6 +243,7 @@ class SettingsDialog(QDialog):
         return page
 
     def _needed_keys(self) -> set[str]:
+        """目前選的服務需要哪些金鑰（本機服務不需要，回傳空字串後被排除）。"""
         asr = self._selected(self._asr, ASR_PRESETS)
         tr = self._selected(self._tr, TRANSLATE_PRESETS)
         need = {
@@ -236,6 +253,7 @@ class SettingsDialog(QDialog):
         return need - {""}
 
     def _refresh_key_hints(self) -> None:
+        """更新每把金鑰的狀態：綠＝已設定（只顯示頭尾）、紅＝需要但沒設定、灰＝用不到。"""
         if not self._key_rows:
             return
         need = self._needed_keys()
@@ -251,6 +269,7 @@ class SettingsDialog(QDialog):
             status.setStyleSheet(f"color: {color};")
 
     def _save_key(self, env: str, clear: bool = False) -> None:
+        """把金鑰存進 Windows 使用者環境變數（clear=True 則刪除）。金鑰本身不會寫進 log。"""
         _status, edit = self._key_rows[env]
         value = "" if clear else edit.text().strip()
         if not clear and not value:
@@ -267,6 +286,7 @@ class SettingsDialog(QDialog):
 
     # ================================================================== 分頁：音訊
     def _build_audio(self) -> QWidget:
+        """「音訊與斷句」分頁：聲音來源與裝置、斷句參數、會出現的語言。"""
         page = QWidget()
         lay = QVBoxLayout(page)
 
@@ -275,15 +295,25 @@ class SettingsDialog(QDialog):
         self._source = QComboBox()
         self._source.addItem("電腦播放的聲音（會議軟體、影片）", "loopback")
         self._source.addItem("麥克風", "mic")
+        self._source.addItem("電腦播放的聲音＋麥克風（會議中雙方都翻譯）", "both")
+        self._source.setToolTip("「電腦播放的聲音＋麥克風」會把對方和自己的聲音混在一起辨識。\n"
+                                "請戴耳機，否則麥克風會再收到一次喇叭的聲音，同一句會出現兩次。")
         self._source.setCurrentIndex(max(0, self._source.findData(self._cfg.audio.source)))
         self._bindings["audio.source"] = self._source.currentData
         self._device = QComboBox()
         self._device.setToolTip("通常用「自動」即可。換耳機後可在系統匣選「重新連接音訊裝置」。")
+        self._mic_device = QComboBox()
+        self._mic_device.setToolTip("自己說話用的麥克風，通常用「自動」即可。")
         self._source.currentIndexChanged.connect(self._fill_devices)
         self._fill_devices()
         self._bindings["audio.device_index"] = self._device.currentData
+        self._bindings["audio.mic_device_index"] = self._mic_device.currentData
         form.addRow("來源：", self._source)
         form.addRow("裝置：", self._device)
+        form.addRow("麥克風裝置：", self._mic_device)
+        self._source_form = form
+        self._update_mic_row()
+        self._source.currentIndexChanged.connect(self._update_mic_row)
         lay.addWidget(src)
 
         seg = QGroupBox("斷句（什麼時候算一句講完）")
@@ -320,29 +350,46 @@ class SettingsDialog(QDialog):
         lay.addStretch(1)
         return page
 
+    def _update_mic_row(self) -> None:
+        """「麥克風裝置」欄位只在選「電腦播放的聲音＋麥克風」時顯示。"""
+        self._source_form.setRowVisible(self._mic_device, self._source.currentData() == "both")
+
     def _fill_devices(self) -> None:
-        current = self._cfg.audio.device_index if self._device.count() == 0 else self._device.currentData()
-        self._device.blockSignals(True)
-        self._device.clear()
-        self._device.addItem("自動（Windows 預設裝置）", -1)
-        want_loopback = self._source.currentData() == "loopback"
+        """依來源填入裝置清單：系統聲音列 loopback 裝置，麥克風列一般輸入裝置。"""
         try:
             from ..audio import list_devices
 
-            for d in list_devices():
-                if d["loopback"] == want_loopback:
-                    self._device.addItem(f"[{d['index']}] {d['name']}", d["index"])
+            devices = list_devices()
         except Exception as exc:  # noqa: BLE001 - 沒有音效卡或非 Windows
             log.debug("無法列出音訊裝置：%s", exc)
-        idx = self._device.findData(current)
+            devices = []
+        want_loopback = self._source.currentData() in ("loopback", "both")
+        self._fill_combo(self._device, self._cfg.audio.device_index,
+                         [d for d in devices if d["loopback"] == want_loopback])
+        self._fill_combo(self._mic_device, self._cfg.audio.mic_device_index,
+                         [d for d in devices if not d["loopback"]])
+
+    @staticmethod
+    def _fill_combo(combo: QComboBox, configured: int, devices: list[dict[str, Any]]) -> None:
+        """重新填入裝置下拉選單，並盡量保留原本選的裝置。"""
+        # 第一次填：用設定檔的值；之後重填：保留使用者剛剛選的
+        current = configured if combo.count() == 0 else combo.currentData()
+        combo.blockSignals(True)  # 填的過程中不要觸發「選項改變」事件
+        combo.clear()
+        combo.addItem("自動（Windows 預設裝置）", -1)
+        for d in devices:
+            combo.addItem(f"[{d['index']}] {d['name']}", d["index"])
+        idx = combo.findData(current)
+        # 設定的裝置現在找不到（例如耳機沒插）：仍列出來，避免存檔時被默默改掉
         if idx < 0 and current not in (-1, None):
-            self._device.addItem(f"[{current}]（目前設定，找不到此裝置）", current)
-            idx = self._device.count() - 1
-        self._device.setCurrentIndex(max(0, idx))
-        self._device.blockSignals(False)
+            combo.addItem(f"[{current}]（目前設定，找不到此裝置）", current)
+            idx = combo.count() - 1
+        combo.setCurrentIndex(max(0, idx))
+        combo.blockSignals(False)
 
     # ================================================================== 分頁：外觀
     def _build_overlay(self) -> QWidget:
+        """「字幕外觀」分頁：字型、字級、句數、寬度、透明度、位置。"""
         page = QWidget()
         form = QFormLayout(page)
         form.addRow(self._check("overlay.show_source", "顯示原文（譯文上方的小字）",
@@ -370,7 +417,9 @@ class SettingsDialog(QDialog):
         return page
 
     # ================================================================== 綁定小工具
+    # 以下三個函式建立元件、填入目前設定值，並登記到 self._bindings 供存檔時讀取
     def _check(self, key: str, text: str, tip: str = "") -> QCheckBox:
+        """勾選框（true / false 設定）。"""
         cb = QCheckBox(text)
         cb.setChecked(bool(get_value(self._cfg, key)))
         cb.setToolTip(tip)
@@ -378,6 +427,7 @@ class SettingsDialog(QDialog):
         return cb
 
     def _spin(self, key: str, lo: int, hi: int, step: int = 1, suffix: str = "", tip: str = "") -> QSpinBox:
+        """整數輸入框（有上下箭頭）。"""
         sp = QSpinBox()
         sp.setRange(lo, hi)
         sp.setSingleStep(step)
@@ -389,6 +439,7 @@ class SettingsDialog(QDialog):
 
     def _dspin(self, key: str, lo: float, hi: float, step: float, decimals: int = 1,
                prefix: str = "", suffix: str = "", tip: str = "") -> QDoubleSpinBox:
+        """小數輸入框。"""
         sp = QDoubleSpinBox()
         sp.setRange(lo, hi)
         sp.setDecimals(decimals)
@@ -404,10 +455,12 @@ class SettingsDialog(QDialog):
     def collect_updates(self) -> dict[str, Any]:
         """畫面上與目前設定不同的項目（區段.鍵 → 新值）。"""
         updates: dict[str, Any] = {}
+        # 1. 服務選單有換：套用該選項的整組設定（引擎、網址、模型、金鑰名稱、單價）
         for combo, presets in ((self._asr, ASR_PRESETS), (self._tr, TRANSLATE_PRESETS)):
             preset = self._selected(combo, presets)
             if preset is not None and combo.currentIndex() != combo.property("initial"):
                 updates.update(preset.updates)
+        # 2. 其他欄位：值和目前設定不同才寫入
         for key, getter in self._bindings.items():
             value = getter()
             old = get_value(self._cfg, key)
@@ -415,9 +468,11 @@ class SettingsDialog(QDialog):
                 value = float(value)
             if value != old:
                 updates[key] = list(value) if isinstance(value, tuple) else value
+        # 最後再過濾一次（服務選項裡和目前設定相同的值不必寫）
         return {k: v for k, v in updates.items() if _differs(get_value(self._cfg, k), v)}
 
     def _save(self) -> None:
+        """按下「儲存」：檢查 → 寫檔 → 重新讀取確認 → 通知 app.py → 關閉視窗。"""
         if not any(cb.isChecked() for cb in self._langs.values()):
             QMessageBox.warning(self, "設定", "「會出現的語言」至少要勾一個。")
             return
@@ -438,6 +493,7 @@ class SettingsDialog(QDialog):
         self.accept()
 
     def _open_glossary(self) -> None:
+        """用記事本開啟術語表；檔案不存在時先從範例複製一份。"""
         path = self._path.parent / self._cfg.translate.glossary_path
         if not path.exists():
             example = self._path.parent / "glossary.example.csv"
@@ -449,6 +505,7 @@ class SettingsDialog(QDialog):
 
 
 def _differs(old: Any, new: Any) -> bool:
+    """比較新舊值（tuple 與 list 內容相同視為相同）。"""
     if isinstance(old, tuple):
         old = list(old)
     return bool(old != new)

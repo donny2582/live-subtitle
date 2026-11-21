@@ -2,6 +2,9 @@
 
 Whisper 在靜音、音樂或雜訊段常會憑空產生固定句子，例如
 "Thank you for watching"、「ご視聴ありがとうございました」。
+
+原因是 Whisper 用大量 YouTube 影片訓練，影片結尾常出現這些字幕，
+所以聽到「沒有內容」時，模型會猜這是影片結尾而產生這些句子。這裡把它們過濾掉。
 """
 
 from __future__ import annotations
@@ -40,14 +43,16 @@ _CONTAINS_PHRASES = (
     "mbc 뉴스",
 )
 
+# 同一小段（1~12 字）連續重複 5 次以上，例如「哈哈哈哈哈」或 "you you you you you"
 _REPEAT_RE = re.compile(r"(.{1,12}?)\1{4,}")
-_NO_SPACE_LANGS = {"ja", "zh", "yue"}
+_NO_SPACE_LANGS = {"ja", "zh", "yue"}  # 字與字之間不加空格的語言
 
 
 def normalize(text: str) -> str:
     """小寫並移除標點、符號與多餘空白（保留單一空格以區分英文單字）。"""
     cleaned = []
     for ch in text.lower():
+        # Unicode 分類：P = 標點、S = 符號、Z = 空白類
         cat = unicodedata.category(ch)
         if cat[0] in {"P", "S"}:
             continue
@@ -56,9 +61,11 @@ def normalize(text: str) -> str:
 
 
 def _key(text: str) -> str:
+    """比對用的鍵：正規化後再去掉所有空格。"""
     return normalize(text).replace(" ", "")
 
 
+# 程式載入時就先把清單轉成比對鍵，之後每句只需要查表
 _EXACT_KEYS = {_key(p) for p in _EXACT_PHRASES}
 _CONTAINS_KEYS = tuple(_key(p) for p in _CONTAINS_PHRASES)
 
@@ -72,6 +79,7 @@ def is_hallucination(text: str) -> bool:
         return True
     if any(k and k in key for k in _CONTAINS_KEYS):
         return True
+    # 重複的部分佔整句 60% 以上、且句子不太短，才當作幻覺（避免誤殺「哈哈」這種正常短句）
     match = _REPEAT_RE.search(key)
     return bool(match and len(match.group(0)) >= 0.6 * len(key) and len(key) >= 8)
 

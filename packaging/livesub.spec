@@ -1,14 +1,18 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller 設定檔：由 scripts\build_exe.ps1 呼叫
+#
+# PyInstaller 會分析程式用到哪些模組，把 Python 與所有套件打包成 dist\LiveSub\LiveSub.exe，
+# 讓沒有安裝 Python 的電腦也能執行。有些套件是「執行時才載入」或附帶資料檔／DLL，
+# PyInstaller 自動分析找不到，所以要在下面手動列出（hiddenimports、datas、binaries）。
 import os
 
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))  # noqa: F821 - SPECPATH 由 PyInstaller 注入
 
-datas = []
-binaries = []
-hiddenimports = ["webrtcvad", "soxr", "pyaudiowpatch"]
+datas = []  # 資料檔（例如 OpenCC 的轉換字典）
+binaries = []  # DLL 等二進位檔
+hiddenimports = ["webrtcvad", "soxr", "pyaudiowpatch"]  # 程式裡延遲 import 的套件
 
 # 雲端套件：anthropic SDK 內部有延遲匯入的模組
 hiddenimports += collect_submodules("anthropic")
@@ -34,6 +38,8 @@ for sub in ("nvidia.cublas", "nvidia.cudnn", "nvidia.cuda_nvrtc"):
     except Exception:  # 未安裝 GPU 套件
         pass
 
+# 以下是 PyInstaller 的固定流程：Analysis（分析相依）→ PYZ（壓縮 Python 程式碼）
+# → EXE（產生執行檔）→ COLLECT（把 exe 與所有檔案收集到 dist\LiveSub 資料夾）
 a = Analysis(  # noqa: F821
     [os.path.join(ROOT, "src", "livesub", "__main__.py")],
     pathex=[os.path.join(ROOT, "src")],

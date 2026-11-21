@@ -1,4 +1,8 @@
-"""OpenAI 相容 /chat/completions（OpenAI、Gemini、DeepSeek、本機 Ollama…）。"""
+"""OpenAI 相容 /chat/completions（OpenAI、Gemini、DeepSeek、本機 Ollama…）。
+
+很多廠商都提供和 OpenAI 一樣格式的 API，所以只要改 base_url 與 model，
+同一份程式就能接不同的服務。直接用 HTTP（requests）呼叫，不需要額外安裝 openai 套件。
+"""
 
 from __future__ import annotations
 
@@ -23,6 +27,8 @@ from .base import (
 
 
 class OpenAICompatTranslator:
+    """呼叫 OpenAI 相容 API 的翻譯器（實作 base.Translator 介面）。"""
+
     is_cloud = True
 
     def __init__(
@@ -45,6 +51,7 @@ class OpenAICompatTranslator:
         self._history = ContextHistory(context_turns)
 
     def _messages(self, text: str, source_lang: str, partial: bool) -> list[dict[str, str]]:
+        """對話格式：系統提示詞 → 前幾句（原文／譯文）→ 這一句原文。"""
         system = build_system_prompt(text, source_lang, partial, self._glossary)
         return [{"role": "system", "content": system}, *self._history.as_messages(),
                 {"role": "user", "content": text}]
@@ -55,12 +62,13 @@ class OpenAICompatTranslator:
             "model": self._cfg.model,
             "messages": self._messages(text, source_lang, partial),
             "temperature": self._cfg.temperature,
-            "max_tokens": max(64, len(text) * 3),
-            "stream": False,
+            "max_tokens": max(64, len(text) * 3),  # 譯文長度上限：約原文的 3 倍，至少 64
+            "stream": False,  # 一次拿到完整結果（字幕不需要逐字顯示）
         }
         data = post_json(self._session, self._url, json=payload, timeout=self._cfg.timeout_s,
                          retries=self._cfg.max_retries, error_cls=TranslationError, label="翻譯服務")
         try:
+            # 回應格式：{"choices": [{"message": {"content": "譯文"}}], "usage": {...}}
             content = data["choices"][0]["message"]["content"] or ""
         except (KeyError, IndexError, TypeError) as exc:
             raise TranslationError(f"API 回應格式非預期：{str(data)[:200]}") from exc
@@ -68,6 +76,7 @@ class OpenAICompatTranslator:
         cost = 0.0
         if self._ledger is not None:
             usage = data.get("usage") or {}
+            # 有些相容服務不回報用量，就用字數粗估
             tin = int(usage.get("prompt_tokens") or len(str(payload["messages"])) // 2)
             tout = int(usage.get("completion_tokens") or len(content))
             cost = self._ledger.record(

@@ -20,18 +20,31 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
 
+# Find a usable Python: the -Python argument first, then the "py" launcher
+# (trying 3.12, 3.13, 3.14, 3.11 in that order), then plain "python".
+# Returns the command as an array, e.g. @("py", "-3.12") or @("python").
 function Find-Python {
     if ($Python) { return ,@($Python) }
     if (Get-Command py -ErrorAction SilentlyContinue) {
+        # When a version is not installed, "py" prints "No suitable Python runtime found"
+        # to stderr. Windows PowerShell 5.1 turns that into a terminating error under
+        # $ErrorActionPreference = "Stop", so relax it inside this function only
+        # (the change is local to the function scope) and rely on the exit code instead.
+        $ErrorActionPreference = "Continue"
         foreach ($v in @("3.12", "3.13", "3.14", "3.11")) {
-            & py "-$v" -c "import sys" 2>$null
-            if ($LASTEXITCODE -eq 0) { return ,@("py", "-$v") }
+            try {
+                & py "-$v" -c "import sys" 2>$null | Out-Null
+                if ($LASTEXITCODE -eq 0) { return ,@("py", "-$v") }
+            } catch {
+                # this version is not installed; try the next one
+            }
         }
     }
     if (Get-Command python -ErrorAction SilentlyContinue) { return ,@("python") }
     throw "Python 3.11-3.14 not found. Install from https://www.python.org/downloads/ (check 'Add to PATH')."
 }
 
+# Step 1: create the .venv virtual environment (only the first time)
 if (-not (Test-Path ".venv\Scripts\python.exe")) {
     $py = Find-Python
     $exe = $py[0]
@@ -44,9 +57,10 @@ if (-not (Test-Path ".venv\Scripts\python.exe")) {
     if ($LASTEXITCODE -ne 0) { throw "Failed to create .venv" }
 }
 
+# Step 2: install packages into .venv (never into the system Python)
 $VenvPy = Join-Path $Root ".venv\Scripts\python.exe"
 & $VenvPy -m pip install --upgrade pip
-& $VenvPy -m pip install -r requirements.txt
+& $VenvPy -m pip install -r requirements.txt   # core: audio, UI, cloud ASR + translation
 if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
 if ($Gpu) {
     Write-Host "Installing local ASR + CUDA runtime DLLs ..." -ForegroundColor Cyan
@@ -61,9 +75,12 @@ if ($Dev) {
     & $VenvPy -m pip install -r requirements-dev.txt
     if ($LASTEXITCODE -ne 0) { throw "dev packages install failed" }
 }
+# Step 3: install this project itself in "editable" mode, so code changes
+# under src\ take effect immediately without reinstalling
 & $VenvPy -m pip install -e . --no-deps
 if ($LASTEXITCODE -ne 0) { throw "editable install failed" }
 
+# Step 4: create the user's own config.toml / glossary.csv from the examples
 foreach ($pair in @(@("config.example.toml", "config.toml"), @("glossary.example.csv", "glossary.csv"))) {
     if (-not (Test-Path $pair[1])) { Copy-Item $pair[0] $pair[1] }
 }

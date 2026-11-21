@@ -20,11 +20,13 @@ from ..config import AppConfig, is_local_url
 
 @dataclass(frozen=True)
 class Preset:
-    label: str
-    updates: Mapping[str, Any]
-    cost: str
-    key_env: str = ""
-    tip: str = ""
+    """下拉選單裡的一個服務選項（欄位說明見檔案開頭）。"""
+
+    label: str  # 選單顯示文字
+    updates: Mapping[str, Any]  # 選它時要寫進 config.toml 的設定
+    cost: str  # 費用說明
+    key_env: str = ""  # 需要的金鑰（空字串 = 不需要）
+    tip: str = ""  # 選單下方的灰色說明
 
 
 ASR_PRESETS: tuple[Preset, ...] = (

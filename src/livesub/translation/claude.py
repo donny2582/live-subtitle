@@ -4,6 +4,9 @@
   Haiku 5.5 可設 thinking = "off" 完全關閉。
 * 支援伺服器端備援（refusal fallback）的模型會自動帶上 `fallbacks: "default"`：
   主模型拒答時，同一次請求內改由備援模型接手。
+
+Claude 不提供語音辨識，只負責翻譯；語音辨識要另外選 Groq、OpenAI 或本機 Whisper。
+金鑰：ANTHROPIC_API_KEY（可在設定視窗的「API 金鑰」分頁填入）。
 """
 
 from __future__ import annotations
@@ -35,10 +38,13 @@ _FALLBACK_MODELS = ("claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5", "cl
 
 
 def supports_server_fallback(model: str) -> bool:
+    """這個模型能不能使用伺服器端備援（例如 Haiku 不支援，送出會被拒絕）。"""
     return model.startswith(_FALLBACK_MODELS)
 
 
 class ClaudeTranslator:
+    """用 Anthropic 官方 SDK 呼叫 Claude 翻譯（實作 base.Translator 介面）。"""
+
     is_cloud = True
 
     def __init__(
@@ -57,6 +63,7 @@ class ClaudeTranslator:
         self._ledger = ledger
         self._norm = normalizer
         self._history = ContextHistory(context_turns)
+        # client 參數是給測試用的（傳入假的 client，不必真的連網）
         if client is None:
             kwargs: dict[str, Any] = {"timeout": cfg.timeout_s, "max_retries": cfg.max_retries}
             if api_key:
@@ -67,11 +74,14 @@ class ClaudeTranslator:
 
     # ------------------------------------------------------------------ 請求
     def _params(self, text: str, source_lang: str, partial: bool) -> dict[str, Any]:
+        """組出 API 請求內容。"""
         params: dict[str, Any] = {
             "model": self._cfg.model,
-            "max_tokens": self._cfg.max_tokens,
+            "max_tokens": self._cfg.max_tokens,  # 回覆長度上限（含思考）
             "system": build_system_prompt(text, source_lang, partial, self._glossary),
+            # 前幾句的原文／譯文 ＋ 這一句原文
             "messages": [*self._history.as_messages(), {"role": "user", "content": text}],
+            # effort：模型要多認真思考；字幕翻譯用 low 最快最省
             "output_config": {"effort": self._cfg.effort},
         }
         if self._cfg.thinking == "off":
@@ -79,6 +89,7 @@ class ClaudeTranslator:
         return params
 
     def _create(self, params: dict[str, Any]) -> Any:
+        """送出請求，並把 SDK 的各種錯誤轉成使用者看得懂的 TranslationError。"""
         try:
             if self._fallback:
                 return self._client.beta.messages.create(
@@ -99,18 +110,21 @@ class ClaudeTranslator:
     def translate(self, text: str, source_lang: str, partial: bool = False) -> TranslationResult:
         t0 = time.perf_counter()
         resp = self._create(self._params(text, source_lang, partial))
-        cost = self._record_usage(resp)
+        cost = self._record_usage(resp)  # 拒答也會計費，所以先記帳
+        # stop_reason 說明模型為什麼停止輸出；refusal = 安全機制拒絕回答
         if resp.stop_reason == "refusal":
             raise TranslationError("Claude 拒絕翻譯這一句")
+        # 回覆由多個區塊組成（思考區塊、文字區塊…），只取文字區塊
         content = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
         if not content and resp.stop_reason == "max_tokens":
             raise TranslationError("Claude 輸出被 max_tokens 截斷，請調高 translate.claude.max_tokens")
         out = self._norm(clean_translation(content))
-        if not partial and out:
+        if not partial and out:  # 只有定稿才當作之後的上下文
             self._history.add(text, out)
         return TranslationResult(out, time.perf_counter() - t0, cost)
 
     def _record_usage(self, resp: Any) -> float:
+        """依回應裡的 token 用量計算費用並記帳。"""
         if self._ledger is None:
             return 0.0
         usage = getattr(resp, "usage", None)
@@ -121,5 +135,6 @@ class ClaudeTranslator:
         return self._ledger.record(cost, input_tokens=tin, output_tokens=tout)
 
     def warmup(self) -> None:
+        """不額外花錢：只檢查設定，真正連線錯誤會在第一句翻譯時回報。"""
         if not self._cfg.model:
             raise TranslationError("translate.claude.model 未設定")

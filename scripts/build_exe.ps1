@@ -20,10 +20,12 @@ if (-not (Test-Path $VenvPy)) { throw "Run scripts\setup.ps1 first." }
 & $VenvPy -m pip install "pyinstaller>=6.10"
 if ($LASTEXITCODE -ne 0) { throw "pyinstaller install failed" }
 
+# packaging\livesub.spec reads LIVESUB_CONSOLE to decide whether the exe opens a console window
 if ($Console) { $env:LIVESUB_CONSOLE = "1" } else { Remove-Item Env:LIVESUB_CONSOLE -ErrorAction SilentlyContinue }
 & $VenvPy -m PyInstaller packaging\livesub.spec --noconfirm --clean
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed" }
 
+# Copy the example files next to the exe; the app creates config.toml from them on first run
 $Dist = Join-Path $Root "dist\LiveSub"
 foreach ($f in @("config.example.toml", "glossary.example.csv", "README.md")) {
     Copy-Item $f $Dist -Force

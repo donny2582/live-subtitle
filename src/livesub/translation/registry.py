@@ -1,4 +1,8 @@
-"""依 translate.engine 建立翻譯器。新增服務時只要在 _BUILDERS 加一行。"""
+"""依 translate.engine 建立翻譯器。新增服務時只要在 _BUILDERS 加一行。
+
+每個建立函式在缺金鑰時回傳 None，build_translator() 就改用 PassthroughTranslator（只顯示原文），
+所以翻譯設定有問題時字幕仍可運作，錯誤訊息會寫在 log 裡。
+"""
 
 from __future__ import annotations
 
@@ -13,6 +17,7 @@ from .passthrough import PassthroughTranslator
 
 log = logging.getLogger(__name__)
 
+# 建立函式的型別：(設定, 術語表, 費用帳本, 環境變數, 繁中轉換器) → 翻譯器或 None
 Builder = Callable[
     [TranslateConfig, list[GlossaryEntry], "BudgetLedger | None", Mapping[str, str], ChineseNormalizer],
     "Translator | None",
@@ -20,6 +25,7 @@ Builder = Callable[
 
 
 def _openai(cfg, glossary, ledger, env, norm):  # type: ignore[no-untyped-def]
+    """OpenAI 相容服務；網址是 localhost（例如 Ollama）時不需要金鑰、不記帳。"""
     from .openai_compat import OpenAICompatTranslator
 
     sub = cfg.openai
@@ -35,6 +41,7 @@ def _openai(cfg, glossary, ledger, env, norm):  # type: ignore[no-untyped-def]
 
 
 def _claude(cfg, glossary, ledger, env, norm):  # type: ignore[no-untyped-def]
+    """Claude；沒有金鑰時仍嘗試建立（SDK 會自己找其他登入方式）。"""
     from .claude import ClaudeTranslator
 
     key = get_secret(env, cfg.claude.api_key_env)
@@ -49,6 +56,7 @@ def _claude(cfg, glossary, ledger, env, norm):  # type: ignore[no-untyped-def]
 
 
 def _deepl(cfg, glossary, ledger, env, norm):  # type: ignore[no-untyped-def]
+    """DeepL。"""
     from .deepl import DeepLTranslator
 
     key = get_secret(env, cfg.deepl.api_key_env)
@@ -58,6 +66,7 @@ def _deepl(cfg, glossary, ledger, env, norm):  # type: ignore[no-untyped-def]
     return DeepLTranslator(cfg.deepl, key, ledger, norm, context_turns=cfg.context_turns)
 
 
+# translate.engine 的值 → 建立函式（"none" 不在這裡，會直接用 PassthroughTranslator）
 _BUILDERS: dict[str, Builder] = {
     "openai": _openai,
     "claude": _claude,

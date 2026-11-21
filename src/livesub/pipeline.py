@@ -9,6 +9,15 @@
 即時性策略：
 * 定稿（final）用有上限的佇列，塞車時丟掉最舊的並提示「辨識跟不上」。
 * 中間結果（partial）用「只保留最新一筆」的信箱，永遠不會累積延遲。
+
+名詞解釋：
+* 定稿（final）：講者停頓、一句話講完後的最終結果，會寫入逐字稿。
+* 中間結果（partial）：句子還沒講完時的暫時結果，只顯示在畫面上，之後會被定稿取代。
+* 佇列（queue）：執行緒之間傳資料的「輸送帶」，一端放入、另一端取出。
+
+為什麼要分成多個執行緒？
+    辨識、翻譯都要呼叫網路 API，一次要等 0.5~2 秒。如果全部在同一個執行緒裡，
+    等待期間就收不到新的聲音。拆開後每段各做各的，音訊擷取永遠不會被卡住。
 """
 
 from __future__ import annotations
@@ -35,11 +44,15 @@ T = TypeVar("T")
 EventCallback = Callable[[SubtitleEvent], None]
 StatusCallback = Callable[[str], None]
 
-_POLL_S = 0.05
+_POLL_S = 0.05  # 各迴圈等待新資料的間隔（秒）；越短反應越快，但會多耗一點 CPU
 
 
 class LatestOnly(Generic[T]):
-    """只保留最新一筆的信箱（執行緒安全）。"""
+    """只保留最新一筆的信箱（執行緒安全）。
+
+    用於中間結果：辨識還沒做完時又來了新的快照，舊的已經沒有意義，直接覆蓋掉。
+    這樣就算辨識比較慢，也只會處理「最新」的內容，延遲不會越積越多。
+    """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -56,14 +69,20 @@ class LatestOnly(Generic[T]):
 
 
 class PartialThrottle:
-    """控制中間結果翻譯的頻率，避免浪費 API 費用。"""
+    """控制中間結果翻譯的頻率，避免浪費 API 費用。
+
+    同一句話的中間結果會一直更新，若每次都送去翻譯會很貴。
+    只有「距離上次翻譯夠久」而且「多出夠多新字」時才再翻一次。
+    """
 
     def __init__(self, min_interval_s: float, min_new_chars: int) -> None:
         self._interval = min_interval_s
         self._min_chars = min_new_chars
+        # 每一句（seq）上次翻譯的時間與當時的文字長度
         self._state: dict[int, tuple[float, int]] = {}
 
     def should_translate(self, seq: int, text: str, now: float) -> bool:
+        """這次的中間結果值得翻譯嗎？值得的話順便記下這次的時間與長度。"""
         last = self._state.get(seq)
         if last is not None:
             last_t, last_len = last
@@ -73,13 +92,19 @@ class PartialThrottle:
         return True
 
     def forget(self, seq: int) -> None:
+        """這句已經定稿，不再需要追蹤。"""
         self._state.pop(seq, None)
-        if len(self._state) > 64:
+        if len(self._state) > 64:  # 保險：避免異常情況下紀錄無限增加
             self._state.clear()
 
 
 class Pipeline:
-    """組裝並管理所有背景執行緒。"""
+    """組裝並管理所有背景執行緒。
+
+    app.py 建立好辨識器、翻譯器等元件後交給 Pipeline，
+    Pipeline 負責把它們用佇列串起來，並在背景執行。
+    結果透過 on_event（字幕）與 on_status（狀態文字）回呼通知畫面。
+    """
 
     def __init__(
         self,
@@ -101,9 +126,12 @@ class Pipeline:
         self._on_event = on_event
         self._on_status = on_status
 
-        self._t0 = time.monotonic()
-        self._stop = threading.Event()
-        self._paused = threading.Event()
+        self._t0 = time.monotonic()  # 工作階段開始時間；字幕時間軸都相對於它
+        self._stop = threading.Event()  # 設定後所有迴圈結束
+        self._paused = threading.Event()  # 設定後暫停處理（不花錢）
+        # 各段之間的「輸送帶」：
+        #   擷取 → _audio_q → 切句 → _final_utts / _partial_utt → 辨識
+        #   辨識 → _final_trs / _partial_tr → 翻譯
         self._audio_q: queue.Queue[AudioChunk] = queue.Queue(maxsize=cfg.audio.max_queue_chunks)
         self._final_utts: queue.Queue[Utterance] = queue.Queue(maxsize=cfg.asr.max_backlog)
         self._partial_utt: LatestOnly[Utterance] = LatestOnly()
@@ -126,6 +154,7 @@ class Pipeline:
         return time.monotonic() - self._t0
 
     def start(self) -> None:
+        """在背景啟動（載入模型可能要很久，不能卡住畫面）。"""
         threading.Thread(target=self._bootstrap, name="bootstrap", daemon=True).start()
 
     @property
@@ -152,6 +181,10 @@ class Pipeline:
 
     # ------------------------------------------------------------------ 啟動
     def _bootstrap(self) -> None:
+        """依序：載入辨識器 → 預熱翻譯器 → 啟動三個處理執行緒 → 最後才開始收音。
+
+        先開處理執行緒再收音，確保收進來的聲音一定有人處理。
+        """
         try:
             self._status("準備語音辨識中…" if self.transcriber.is_cloud
                          else "載入語音辨識模型中（第一次會下載，請稍候）…")
@@ -161,6 +194,7 @@ class Pipeline:
             log.exception("啟動失敗")
             self._status(f"啟動失敗：{exc}")
             return
+        # 是否產生中間結果：on = 一定要；auto = 只有辨識器夠快（本機 GPU）才要
         mode = self.cfg.asr.partial_results
         emit_partials = mode == "on" or (mode == "auto" and self.transcriber.realtime_partials)
         if mode == "auto" and not emit_partials:
@@ -178,6 +212,7 @@ class Pipeline:
             self.capture.start()
 
     def _status(self, message: str, dedupe_s: float = 0.0) -> None:
+        """更新畫面上的狀態文字。dedupe_s 秒內重複的相同訊息會略過，避免洗版。"""
         last_msg, last_t = self._last_status
         now = time.monotonic()
         if dedupe_s and message == last_msg and now - last_t < dedupe_s:
@@ -187,15 +222,17 @@ class Pipeline:
 
     # ------------------------------------------------------------------ 切句
     def _segment_loop(self, seg: UtteranceSegmenter) -> None:
+        """切句執行緒：從音訊佇列取 50 毫秒的小塊，交給切句器判斷句子的開頭與結尾。"""
         was_paused = False
         while not self._stop.is_set():
             try:
                 samples, t = self._audio_q.get(timeout=0.2)
             except queue.Empty:
+                # 一段時間沒有音訊（例如電腦沒播聲音）：讓切句器有機會把講到一半的句子收尾
                 self._dispatch(seg.on_idle(self.clock()))
                 continue
             if self._paused.is_set():
-                if not was_paused:
+                if not was_paused:  # 剛進入暫停：丟掉講到一半的句子
                     seg.reset()
                     was_paused = True
                 continue
@@ -203,6 +240,7 @@ class Pipeline:
             self._dispatch(seg.push(samples, t))
 
     def _dispatch(self, utts: list[Utterance]) -> None:
+        """把切好的句子送往辨識：中間快照放「最新信箱」，定稿放佇列（滿了丟最舊的）。"""
         for u in utts:
             if not u.is_final:
                 self._partial_utt.put(u)
@@ -212,6 +250,10 @@ class Pipeline:
 
     # ------------------------------------------------------------------ 辨識
     def _next_utterance(self) -> Utterance | None:
+        """取下一個要辨識的音訊：定稿優先；沒有定稿才處理中間快照。
+
+        已經定稿的句子，它的舊快照就不用再辨識了（partial.seq > _finalized_seq 的判斷）。
+        """
         try:
             return self._final_utts.get(timeout=_POLL_S)
         except queue.Empty:
@@ -222,6 +264,7 @@ class Pipeline:
         return None
 
     def _asr_loop(self) -> None:
+        """辨識執行緒：音訊 → 文字。定稿交給翻譯執行緒；中間結果先直接顯示原文。"""
         while not self._stop.is_set():
             utt = self._next_utterance()
             if utt is None:
@@ -240,6 +283,7 @@ class Pipeline:
                 self._partial_tr.put(tr)
 
     def _transcribe(self, utt: Utterance) -> Transcription | None:
+        """辨識一段音訊；預算用完或失敗時回傳 None（單句失敗不影響後面的句子）。"""
         if not self._cloud_allowed(self.transcriber.is_cloud, partial=not utt.is_final):
             if utt.is_final:
                 self._status("本月雲端預算已用完，暫停語音辨識", dedupe_s=300)
@@ -256,6 +300,7 @@ class Pipeline:
 
     @staticmethod
     def _empty(utt: Utterance) -> Transcription:
+        """空白的定稿：辨識失敗時用來通知畫面「這句結束了」，把殘留的中間結果清掉。"""
         return Transcription(utt.seq, True, utt.started_at, utt.ended_at, "", 0.0, "", 0.0)
 
     @staticmethod
@@ -273,6 +318,7 @@ class Pipeline:
 
     # ------------------------------------------------------------------ 翻譯
     def _translate_loop(self) -> None:
+        """翻譯執行緒：定稿優先翻譯；空檔時才翻譯最新的中間結果。"""
         while not self._stop.is_set():
             try:
                 tr = self._final_trs.get(timeout=_POLL_S)
@@ -284,11 +330,13 @@ class Pipeline:
             self._translate_final(tr)
 
     def _cloud_allowed(self, is_cloud: bool, partial: bool) -> bool:
+        """預算檢查：本機服務永遠允許；雲端服務交給費用帳本判斷（中間結果會比定稿先被停掉）。"""
         if not is_cloud or self.ledger is None:
             return True
         return self.ledger.allows(partial)
 
     def _translate_partial(self, tr: Transcription) -> None:
+        """翻譯中間結果（失敗就算了，反正定稿還會再翻一次）。"""
         cfg = self.cfg.translate
         if not cfg.partial_translation or tr.language == "zh" or self.translator.name == "none":
             return
@@ -301,6 +349,7 @@ class Pipeline:
         except TranslationError as exc:
             log.debug("中間結果翻譯失敗：%s", exc)
             return
+        # 翻譯期間這句可能已經定稿了，那就不要再顯示過時的中間譯文
         if tr.seq > self._finalized_seq and res.text:
             self._on_event(
                 self._event(tr, Stage.PARTIAL_TRANSLATION, translated_text=res.text,
@@ -308,8 +357,9 @@ class Pipeline:
             )
 
     def _translate_final(self, tr: Transcription) -> None:
+        """翻譯定稿，寫入逐字稿並顯示。中文語音不送翻譯，只做繁體轉換。"""
         self._throttle.forget(tr.seq)
-        if not tr.text:
+        if not tr.text:  # 辨識不出內容（或失敗）：只通知畫面清掉這句
             self._on_event(self._event(tr, Stage.FINAL))
             return
         translated, latency, error = "", 0.0, None

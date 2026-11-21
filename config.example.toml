@@ -11,7 +11,9 @@
 
 [audio]
 source = "loopback"        # loopback = 擷取電腦播放的聲音（會議、影片）；mic = 麥克風
+                           # both = 兩者混音（會議中對方＋自己都翻譯；請戴耳機，否則同一句會被收兩次）
 device_index = -1          # -1 = 預設喇叭／耳機；用 run.ps1 -ListDevices 查詢編號
+mic_device_index = -1      # 只在 source = "both" 時使用：麥克風編號，-1 = 預設麥克風
 
 [segmenter]
 vad_aggressiveness = 2     # 0~3，背景音樂或雜音多時調高
