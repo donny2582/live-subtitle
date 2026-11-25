@@ -73,7 +73,7 @@ class BudgetLedger:
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
             self._data = {k: MonthUsage(**v) for k, v in raw.items()}
-        except (OSError, ValueError, TypeError) as exc:
+        except (OSError, ValueError, TypeError, AttributeError) as exc:  # AttributeError：內容不是 {}
             backup = self._path.with_suffix(".corrupt.json")
             log.error("用量檔損毀（%s），已備份到 %s 並重新計算", exc, backup)
             try:

@@ -174,6 +174,20 @@ def test_budget_ledger_recovers_from_corrupt_file(tmp_path):
     assert (tmp_path / "u.corrupt.json").exists()
 
 
+def test_budget_ledger_recovers_from_non_dict_file(tmp_path):
+    p = tmp_path / "u.json"
+    p.write_text("[1, 2]", encoding="utf-8")
+    ledger = BudgetLedger(BudgetConfig(), p)
+    assert ledger.month_usage().requests == 0
+
+
+def test_transcript_writer_ignores_write_after_close(tmp_path):
+    w = TranscriptWriter(tmp_path, OutputConfig())
+    w.close()
+    w.write(SubtitleEvent(seq=1, stage=Stage.FINAL, started_at=0.0, ended_at=1.0, language="en",
+                          source_text="hi", translated_text="嗨"))
+
+
 def test_time_format():
     assert format_srt_time(3723.4567) == "01:02:03,457"
     assert format_srt_time(-1) == "00:00:00,000"

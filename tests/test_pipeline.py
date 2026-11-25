@@ -116,6 +116,21 @@ def test_pipeline_translation_failure_still_writes_source(tmp_path):
     assert "翻譯失敗：模擬逾時" in (tmp_path / "transcript.txt").read_text(encoding="utf-8-sig")
 
 
+class CrashingTranslator(FakeTranslator):
+    """模擬 SDK 丟出非 TranslationError 的例外（例如 KeyError）。"""
+
+    def translate(self, text: str, source_lang: str, partial: bool = False) -> TranslationResult:
+        raise KeyError("unexpected")
+
+
+def test_unexpected_translator_error_does_not_kill_thread(tmp_path):
+    # 修正前：非預期例外會讓翻譯執行緒結束，之後所有句子都不再出現
+    signal = np.concatenate([tone(1.0), silence(1.0), tone(1.0), silence(1.0)])
+    events = run_pipeline(tmp_path, FakeAsr(), CrashingTranslator(), signal)
+    finals = [e for e in events if e.stage is Stage.FINAL]
+    assert len(finals) == 2 and all(e.error and e.translated_text == "" for e in finals)
+
+
 def test_chinese_speech_is_not_sent_to_translator(tmp_path):
     signal = np.concatenate([tone(1.0), silence(1.0), tone(1.0), silence(1.0)])
     events = run_pipeline(tmp_path, FakeAsr("zh"), FakeTranslator(fail=True), signal)

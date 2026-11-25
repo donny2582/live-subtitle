@@ -333,14 +333,14 @@ def main(argv: list[str] | None = None) -> int:
             from PyQt6.QtCore import QProcess
 
             cmd = restart_command()
-            pipeline.stop()
-            instance.release()  # 先放開「只能開一個」的鎖，新程式才能接手
-            # 先啟動新的程式，成功了才關掉自己
-            if QProcess.startDetached(cmd[0], cmd[1:], str(base)):
-                app.quit()
-            else:
-                instance.acquire()  # 沒有成功重新啟動：把鎖拿回來，繼續擋住重複開啟
+            # 先啟動新的程式（它帶 --restarted，會等最多 10 秒讓我們放開鎖），成功了才停掉自己。
+            # 若先停管線再啟動，啟動失敗時字幕就停了卻還開著，使用者只能手動重開。
+            if not QProcess.startDetached(cmd[0], cmd[1:], str(base)):
                 overlay.show_status("重新啟動失敗，請手動關閉後再開啟")
+                return
+            pipeline.stop()
+            instance.release()  # 放開「只能開一個」的鎖，新程式才能接手
+            app.quit()
 
     def open_settings() -> None:
         # 設定視窗已經開著（例如又從選單點了一次）就拿到最前面，不要再開第二個

@@ -120,6 +120,8 @@ class ClaudeTranslator:
             raise TranslationError(f"Claude HTTP {exc.status_code}") from exc
         except anthropic.APIConnectionError as exc:  # 含逾時
             raise TranslationError(f"Claude 無回應：{exc}") from exc
+        except anthropic.APIError as exc:  # 其他 SDK 錯誤（例如回應格式驗證失敗、串流中斷）
+            raise TranslationError(f"Claude 錯誤：{exc}") from exc
 
     def translate(self, text: str, source_lang: str, partial: bool = False,
                   on_delta: Callable[[str], None] | None = None) -> TranslationResult:

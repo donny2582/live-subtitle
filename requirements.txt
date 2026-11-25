@@ -9,7 +9,6 @@ httpcore2==2.16.2
 httpx2==2.16.2
 idna==3.20
 jiter==0.19.0
--e git+https://github.com/donny2582/live-subtitle.git@f9ce68527cfadc70d803a473e244c0b215bfc61a#egg=livesub
 numpy==2.5.5
 opencc-python-reimplemented==0.1.7
 opentelemetry-api==1.45.2

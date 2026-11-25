@@ -127,7 +127,7 @@ class TranscriptWriter:
                     record[k] = round(float(record[k]), 3)
                 self._jsonl.write(json.dumps(record, ensure_ascii=False) + "\n")
                 self._jsonl.flush()
-        except OSError as exc:
+        except (OSError, ValueError) as exc:  # ValueError：程式結束時檔案已關閉，翻譯執行緒還在寫
             log.error("寫入逐字稿失敗：%s", exc)
 
     def close(self) -> None:
