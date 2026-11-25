@@ -357,6 +357,9 @@ class Pipeline:
         except TranslationError as exc:
             log.debug("中間結果翻譯失敗：%s", exc)
             return
+        except Exception:  # noqa: BLE001 - 非預期錯誤不能讓翻譯執行緒整個停掉
+            log.exception("中間結果翻譯發生非預期錯誤 seq=%d", tr.seq)
+            return
         # 翻譯期間這句可能已經定稿了，那就不要再顯示過時的中間譯文
         if tr.seq > self._finalized_seq and res.text:
             self._on_event(
@@ -398,6 +401,10 @@ class Pipeline:
                 except TranslationError as exc:
                     error = str(exc)
                     log.warning("翻譯失敗 seq=%d：%s", tr.seq, exc)
+                    self._status(f"翻譯失敗：{exc}", dedupe_s=30)
+                except Exception as exc:  # noqa: BLE001 - 非預期錯誤：這句只顯示原文，執行緒繼續運作
+                    error = f"非預期錯誤：{exc}"
+                    log.exception("翻譯發生非預期錯誤 seq=%d", tr.seq)
                     self._status(f"翻譯失敗：{exc}", dedupe_s=30)
             else:
                 error = "本月雲端預算已用完"

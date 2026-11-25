@@ -112,8 +112,8 @@ scripts\run.ps1 --log-level DEBUG            # 每句延遲寫進 logs\livesub.l
 ## 4. 打包成 .exe
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\build_exe.ps1
-# 需要看錯誤訊息時：scripts\build_exe.ps1 -Console
+powershell -ExecutionPolicy Bypass -File tests\build_exe\build_exe.ps1
+# 需要看錯誤訊息時：tests\build_exe\build_exe.ps1 -Console
 ```
 
 產出 `dist\LiveSub\LiveSub.exe`。整個 `LiveSub` 資料夾壓縮後即可帶到其他電腦，
@@ -246,8 +246,8 @@ live-subtitle/
 │     ├─ settings.py         設定視窗（四個分頁）
 │     └─ presets.py          設定視窗的服務選項（要加新選項改這裡）
 ├─ tests/                    pytest（不需 GPU、音效卡、網路）
-├─ scripts/                  setup.ps1、run.ps1、build_exe.ps1
-├─ packaging/                PyInstaller spec
+├─ scripts/                  setup.ps1、run.ps1、create_shortcut.ps1
+├─ tests/build_exe/          build_exe.ps1 打包腳本、livesub.spec（PyInstaller 設定）
 ├─ config.example.toml
 └─ glossary.example.csv
 ```

@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 import numpy as np
 import numpy.typing as npt
@@ -20,7 +20,7 @@ import numpy.typing as npt
 AudioArray = npt.NDArray[np.float32]
 
 
-class Stage(str, Enum):
+class Stage(StrEnum):
     """字幕事件的階段。"""
 
     PARTIAL_SOURCE = "partial_source"  # 句子還在講，原文中間結果
